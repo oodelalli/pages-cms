@@ -18,10 +18,10 @@ jobs:
 
       - name: Sync Upstream
         run: |
+          git config --global user.email "john@johnhall.codes"
+          git config --global user.name "John"
           git remote add upstream https://github.com/pages-cms/pages-cms.git || true
           git fetch upstream
           git checkout main
           git merge upstream/main
           git push origin main
-          git config --global user.email "john@johnhall.codes"
-          git config --global user.name "John"
