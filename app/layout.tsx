@@ -31,7 +31,6 @@ export default async function RootLayout({
           inter.className
         )}
       >
-		TEST
         {children}
         <Toaster/>
       </body>
