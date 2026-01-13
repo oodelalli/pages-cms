@@ -2,7 +2,7 @@
 
 console.log(`Now you're cookin!`);
 
-window.oodelalliPublishChanges = async (button) => {
+async function oodelalliPublishChanges(button) {
 
 	const buildHook = button.dataset.buildHook;
 
