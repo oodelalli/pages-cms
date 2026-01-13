@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useUser } from "@/contexts/user-context";
 import { useRepo } from "@/contexts/repo-context";
+import { useConfig } from "@/contexts/config-context";
 import { User } from "@/components/user";
 import { RepoDropdown } from "@/components/repo/repo-dropdown";
 import { RepoNav } from "@/components/repo/repo-nav";
@@ -17,6 +18,7 @@ const RepoSidebar = ({
 }) => {
   const { user } = useUser();
   const repo = useRepo();
+  const { config } = useConfig();
 
   const account = user?.accounts?.find((account) => account.login === repo.owner);
 
@@ -31,7 +33,7 @@ const RepoSidebar = ({
       <div className="px-3 pt-1">
         <RepoDropdown onClick={onClick} />
       </div>
-	  <button>TEST</button>
+	  <button id="publishChangesBtn" data-hook="{config}">TEST</button>
       <nav className="px-3 flex flex-col gap-y-1 overflow-auto">
         <RepoNav onClick={onClick}/>
       </nav>
