@@ -2,9 +2,9 @@
 
 console.log(`Now you're cookin!`);
 
-document.querySelector(`#publishChangesBtn`).addEventListener(`click`, async e => {
+async function publishChanges(button) {
 
-	const buildHook = e.target.dataset.buildHook;
+	const buildHook = button.dataset.buildHook;
 
 	if (!buildHook) {
 
@@ -25,4 +25,4 @@ document.querySelector(`#publishChangesBtn`).addEventListener(`click`, async e =
 	 *  Try to prevent too many deploys
 	 * - store last build time locally?
 	 */
-});
+}
