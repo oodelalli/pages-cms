@@ -20,6 +20,8 @@ const RepoSidebar = ({
   const repo = useRepo();
   const { config } = useConfig();
 
+  const configString = JSON.stringify(config);
+
   const account = user?.accounts?.find((account) => account.login === repo.owner);
 
   return (
@@ -33,7 +35,7 @@ const RepoSidebar = ({
       <div className="px-3 pt-1">
         <RepoDropdown onClick={onClick} />
       </div>
-	  <pre>{JSON.stringify(config.object)}</pre>
+	  <pre>{configString}</pre>
 	  <button id="publishChangesBtn" data-hook={config.object.hook}>TEST</button>
       <nav className="px-3 flex flex-col gap-y-1 overflow-auto">
         <RepoNav onClick={onClick}/>
