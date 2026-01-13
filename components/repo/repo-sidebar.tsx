@@ -33,8 +33,8 @@ const RepoSidebar = ({
       <div className="px-3 pt-1">
         <RepoDropdown onClick={onClick} />
       </div>
-	  <pre>{config ? JSON.stringify(config) : ``}</pre>
-	  <button id="publishChangesBtn" data-hook={}>TEST</button>
+	  <pre>{config ? JSON.stringify(config) : ""}</pre>
+	  <button id="publishChangesBtn" data-hook>TEST</button>
       <nav className="px-3 flex flex-col gap-y-1 overflow-auto">
         <RepoNav onClick={onClick}/>
       </nav>
