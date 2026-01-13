@@ -8,6 +8,16 @@ button:has(svg.lucide-folder-open)::after {
     content: "Select from Media";
 }
 
+button[data-build-hook] {
+	background-color: black;
+	border-radius: 0.4em;
+	color: white;
+	font-weight: 700;
+	inline-size: 90%;
+	margin: 0.5rem auto;
+	padding: 0.5em 0.75em;
+}
+
 /* Prints */
 .portfolio-image {
     max-block-size: 50svh;

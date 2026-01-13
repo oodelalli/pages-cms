@@ -4,13 +4,25 @@ console.log(`Now you're cookin!`);
 
 document.querySelector(`#publishChangesBtn`).addEventListener(`click`, async e => {
 
-	// await fetch(``)
+	const buildHook = e.target.dataset.buildHook;
+
+	if (!buildHook) {
+
+		alert(`Sorry, there's no build hook set in the config.`);
+
+		return;
+	}
+
+	if (!confirm(`Re-deploy the website with the changes you've made? Please wait until you're finished making changes for the day.`)) return false;
+
+	const res = await fetch(buildHook, { method: "POST" });
+
+	console.log(res.status);
+
+	alert(`Okay, the site is re-deploying!`);
 
 	/**
-	 *
-	 * NEED to store build hook as ENV somehow
-	 * - this CMS fork may be used on multiple sites
-	 *
+	 *  Try to prevent too many deploys
+	 * - store last build time locally?
 	 */
-
 });
