@@ -13,10 +13,10 @@ import mergeWith from "lodash.mergewith";
 
 /**
  * Create, update and delete individual files in a GitHub repository.
- * 
+ *
  * POST /api/[owner]/[repo]/[branch]/files/[path]
  * DELETE /api/[owner]/[repo]/[branch]/files/[path]
- * 
+ *
  * Requires authentication.
  */
 
@@ -77,11 +77,11 @@ export async function POST(
               contentObject = data.content;
               contentFields = schema.fields;
             }
-            
+
             // Use mapBlocks to convert config blocks array to a map
             const zodSchema = generateZodSchema(contentFields);
             const zodValidation = zodSchema.safeParse(contentObject);
-            
+
             if (zodValidation.success === false ) {
               const errorMessages = zodValidation.error.errors.map((error: any) => {
                 let message = error.message;
@@ -114,7 +114,7 @@ export async function POST(
                 path: normalizedPath,
                 ref: params.branch
               });
-              
+
               if (Array.isArray(response.data)) {
                 throw new Error("Expected a file but found a directory");
               } else if (response.data.type !== "file") {
@@ -130,7 +130,7 @@ export async function POST(
                 }
               });
             }
-            
+
             const stringifiedContentObject = stringify(
               sanitizeObject(finalContentObject),
               {
@@ -151,7 +151,7 @@ export async function POST(
         if (!schema) throw new Error(`Media schema not found for ${data.name}.`);
 
         if (!normalizedPath.startsWith(schema.input)) throw new Error(`Invalid path "${params.path}" for media "${data.name}".`);
-        
+
         if (getFileName(normalizedPath) === ".gitkeep") {
           // Folder creation
           contentBase64 = "";
@@ -172,9 +172,9 @@ export async function POST(
       default:
         throw new Error(`Invalid type "${data.type}".`);
     }
-    
+
     const response = await githubSaveFile(token, params.owner, params.repo, params.branch, normalizedPath, contentBase64, data.sha);
-  
+
     const savedPath = response?.data.content?.path;
 
     let newConfig;
@@ -189,10 +189,10 @@ export async function POST(
         version: configVersion ?? "0.0",
         object: configObject
       };
-      
+
       await updateConfig(newConfig);
     }
-    
+
     if (response?.data.content && response?.data.commit) {
       // If the file is successfully saved, update the cache
       await updateFileCache(
@@ -252,14 +252,16 @@ const githubSaveFile = async (
 ) => {
   // We disable retries for 409 errors as it means the file has changed (conflict on SHA)
   const octokit = createOctokitInstance(token, { retry: { doNotRetry: [409] } });
-  
+
+  const commitMsgPrefix = branch === `main` ? `[skip ci]` : ``;
+
   try {
     // First attempt: try with original path
     const response = await octokit.rest.repos.createOrUpdateFileContents({
       owner,
       repo,
       path,
-      message: sha ? `Update ${path} (via Pages CMS)` : `Create ${path} (via Pages CMS)`,
+      message: sha ? `${commitMsgPrefix} Update ${path} (via Pages CMS)` : `Create ${path} (via Pages CMS)`,
       content: contentBase64,
       branch,
       sha: sha || undefined,
@@ -305,7 +307,7 @@ const githubSaveFile = async (
             owner,
             repo,
             path: newPath,
-            message: `Create ${newPath} (via Pages CMS)`,
+            message: `${commitMsgPrefix} Create ${newPath} (via Pages CMS)`,
             content: contentBase64,
             branch,
           });
@@ -357,13 +359,13 @@ export async function DELETE(
 
         schema = getSchemaByName(config.object, name);
         if (!schema) throw new Error(`Content schema not found for ${name}.`);
-        
+
         if (!normalizedPath.startsWith(schema.path)) throw new Error(`Invalid path "${params.path}" for ${type} "${name}".`);
-        
+
         if (schema.subfolders === false && getParentPath(normalizedPath) !== schema.path) {
           throw new Error(`Subfolders are not allowed for collection "${name}".`);
         }
-        
+
         if (getFileExtension(normalizedPath) !== schema.extension) throw new Error(`Invalid extension "${getFileExtension(normalizedPath)}" for ${type} "${name}".`);
         break;
       case "media":
@@ -380,7 +382,9 @@ export async function DELETE(
         ) throw new Error(`Invalid extension "${getFileExtension(normalizedPath)}" for media.`);
         break;
     }
-    
+
+	const commitMsgPrefix = params.branch === `main` ? `[skip ci]` : ``;
+
     const octokit = createOctokitInstance(token);
     const response = await octokit.rest.repos.deleteFile({
       owner: params.owner,
@@ -388,7 +392,7 @@ export async function DELETE(
       branch: params.branch,
       path: params.path,
       sha: sha,
-      message: `Delete ${params.path} (via Pages CMS)`,
+      message: `${commitMsgPrefix} Delete ${params.path} (via Pages CMS)`,
     });
 
     // Update cache after successful deletion
