@@ -253,7 +253,8 @@ const githubSaveFile = async (
   // We disable retries for 409 errors as it means the file has changed (conflict on SHA)
   const octokit = createOctokitInstance(token, { retry: { doNotRetry: [409] } });
 
-  const commitMsgPrefix = branch === `main` ? `[skip ci]` : ``;
+//   const commitMsgPrefix = branch === `main` ? `[skip ci]` : ``;
+  const commitMsgPrefix = `[skip ci]`;
 
   try {
     // First attempt: try with original path
