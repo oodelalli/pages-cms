@@ -3,7 +3,6 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { cn } from "@/lib/utils";
 import "./globals.css";
-import { useConfig } from "@/contexts/config-context";
 
 const inter = Inter({ subsets: ["latin"] });
 const { config } = useConfig();
@@ -25,9 +24,6 @@ export default async function RootLayout({
     <html lang="en" suppressHydrationWarning>
 		<head>
 			<link rel="stylesheet" href="/custom.css" />
-			{config?.object?.custom_css_url && (
-				<link rel="stylesheet" href={config.object.custom_css_url} />
-			)}
 			<script src="/custom.js" defer></script>
 		</head>
       <body

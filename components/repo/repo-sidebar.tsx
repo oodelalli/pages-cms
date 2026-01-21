@@ -41,6 +41,9 @@ const RepoSidebar = ({
         <User className="mr-auto" onClick={onClick}/>
         <About onClick={onClick}/>
       </footer>
+		{config?.object?.custom_css_url && (
+			<link rel="stylesheet" href={config.object.custom_css_url} />
+		)}
     </>
   );
 }
