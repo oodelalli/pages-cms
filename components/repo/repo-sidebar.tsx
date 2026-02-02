@@ -33,7 +33,9 @@ const RepoSidebar = ({
       <div className="px-3 pt-1">
         <RepoDropdown onClick={onClick} />
       </div>
-	  <button id="publishChangesBtn" data-build-hook={config?.object?.build_hook} onClick={(e) => (window as any).oodelalliPublishChanges(e.currentTarget)}>Publish</button>
+	  {config?.object?.build_hook && (
+		<button id="publishChangesBtn" data-build-hook={config.object.build_hook} onClick={(e) => (window as any).oodelalliPublishChanges(e.currentTarget)}>Publish</button>
+	  )}
       <nav className="px-3 flex flex-col gap-y-1 overflow-auto">
         <RepoNav onClick={onClick}/>
       </nav>
