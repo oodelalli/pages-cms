@@ -30,6 +30,7 @@ const RepoSidebar = ({
           All projects
         </Link>
       </header>
+	  {account.login}
       <div className="px-3 pt-1">
         <RepoDropdown onClick={onClick} />
       </div>
