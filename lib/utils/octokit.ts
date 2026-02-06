@@ -16,21 +16,22 @@ export const createOctokitInstance = (token: string, options?: any) => {
       fetch: async (url: string, options: RequestInit) => {
         try {
           const response = await fetch(url, options);
-          
+
           // Only attempt to log out on a 401 status
           if (response.status === 401) {
             try {
               const data = await response.json();
               if (data.message === "Bad credentials") {
                 // If the user revoked access, sign them out
-                await handleSignOut();
+                // await handleSignOut();
+				console.warn("Bad credentials detected"); // handleSignOut() broken?
               }
             } catch (parseError) {
               // If we can't parse the JSON, just continue
               console.warn("Could not parse 401 response:", parseError);
             }
           }
-          
+
           // Always return the original response regardless of status
           return response;
         } catch (error) {
