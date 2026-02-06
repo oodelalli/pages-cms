@@ -24,13 +24,12 @@ const RepoSidebar = ({
 
   return (
     <>
-      <header className="border-b flex items-center px-3 py-2">
+      <header className="border-b flex items-center px-3 py-2" data-user={user?.email}>
         <Link className={buttonVariants({ variant: "ghost", size: "xs" })} href="/" prefetch={true}>
           <ArrowLeft className="h-4 w-4 mr-1.5" />
           All projects
         </Link>
       </header>
-	  {user?.email}
       <div className="px-3 pt-1">
         <RepoDropdown onClick={onClick} />
       </div>
