@@ -23,8 +23,7 @@ export const createOctokitInstance = (token: string, options?: any) => {
               const data = await response.json();
               if (data.message === "Bad credentials") {
                 // If the user revoked access, sign them out
-                // await handleSignOut();
-				console.warn("Bad credentials detected"); // handleSignOut() broken?
+                await handleSignOut();
               }
             } catch (parseError) {
               // If we can't parse the JSON, just continue
