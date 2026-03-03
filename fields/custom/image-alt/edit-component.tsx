@@ -4,15 +4,25 @@ import { forwardRef, useCallback, useState, useEffect, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { MediaUpload } from "@/components/media/media-upload";
 import { MediaDialog } from "@/components/media/media-dialog";
-import { Trash2, Upload, FolderOpen, ArrowUpRight } from "lucide-react";
+import { Trash2, Upload, FolderOpen, ArrowUpRight, Edit2, AlertCircle, CheckCircle2 } from "lucide-react";
 import { useConfig } from "@/contexts/config-context";
 import { extensionCategories, normalizePath } from "@/lib/utils/file";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, rectSortingStrategy } from '@dnd-kit/sortable';
 import { useSortable } from '@dnd-kit/sortable';
@@ -26,74 +36,187 @@ import { getAllowedExtensions } from "./index";
 
 const generateId = () => uuidv4().slice(0, 8);
 
-const ImageWithAlt = ({ id, file, config, media, onRemove, onAltChange }: { 
+const AltTextModal = ({ 
+  open, 
+  onOpenChange, 
+  file, 
+  onSave,
+  imagePath,
+  mediaName
+}: { 
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  file: { path: string; alt: string };
+  onSave: (alt: string) => void;
+  imagePath: string;
+  mediaName: string;
+}) => {
+  const [altText, setAltText] = useState(file.alt);
+  const { config } = useConfig();
+
+  useEffect(() => {
+    setAltText(file.alt);
+  }, [file.alt, open]);
+
+  const handleSave = () => {
+    onSave(altText);
+    onOpenChange(false);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-[500px]">
+        <DialogHeader>
+          <DialogTitle>Edit Alt Text</DialogTitle>
+          <DialogDescription>
+            Describe this image for screen readers and SEO.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="flex items-center gap-3">
+            <Thumbnail name={mediaName} path={imagePath} className="rounded-md w-24 h-24 flex-shrink-0"/>
+            <div className="text-sm text-muted-foreground overflow-hidden">
+              <p className="truncate">{imagePath.split('/').pop()}</p>
+              <a 
+                href={`https://github.com/${config?.owner}/${config?.repo}/blob/${config?.branch}/${imagePath}`}
+                target="_blank"
+                className="text-xs hover:underline inline-flex items-center gap-1"
+              >
+                View on GitHub
+                <ArrowUpRight className="h-3 w-3" />
+              </a>
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="alt-text">Alt Text</Label>
+            <Textarea
+              id="alt-text"
+              value={altText}
+              onChange={(e) => setAltText(e.target.value)}
+              placeholder="Describe the image..."
+              rows={4}
+              className="resize-none"
+            />
+            <p className="text-xs text-muted-foreground">
+              Be descriptive but concise. Include important context that isn't in surrounding text.
+            </p>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button onClick={handleSave}>
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+const ImageThumbnail = ({ 
+  id, 
+  file, 
+  config, 
+  media, 
+  onRemove, 
+  onEditAlt 
+}: { 
   id: string;
   file: { path: string; alt: string };
   config: any;
   media: string;
   onRemove: (id: string) => void;
-  onAltChange: (id: string, alt: string) => void;
+  onEditAlt: (id: string) => void;
 }) => {
-  return (
-    <div className="space-y-2">
-      <div className="relative">
-        <Thumbnail name={media} path={file.path} className="rounded-md w-28 h-28"/>
-        <div className="absolute bottom-1.5 right-1.5">
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <a
-                  href={`https://github.com/${config.owner}/${config.repo}/blob/${config.branch}/${file.path}`}
-                  target="_blank"
-                  className={cn(buttonVariants({ variant: "secondary", size: "icon-xs" }), "rounded-r-none")}
-                >
-                  <ArrowUpRight className="h-4 w-4" />
-                </a>
-              </TooltipTrigger>
-              <TooltipContent>
-                See on GitHub
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+  const hasAlt = file.alt && file.alt.trim().length > 0;
 
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon-xs"
-                  variant="secondary"
-                  onClick={() => onRemove(id)}
-                  className="rounded-l-none"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>
-                Remove
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        </div>
+  return (
+    <div className="relative group">
+      <Thumbnail name={media} path={file.path} className="rounded-md w-28 h-28"/>
+      
+      {/* Alt text status indicator */}
+      <div className="absolute top-1.5 left-1.5">
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className={cn(
+                "rounded-full p-1",
+                hasAlt ? "bg-green-500/90" : "bg-amber-500/90"
+              )}>
+                {hasAlt ? (
+                  <CheckCircle2 className="h-3 w-3 text-white" />
+                ) : (
+                  <AlertCircle className="h-3 w-3 text-white" />
+                )}
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>
+              {hasAlt ? "Alt text added" : "Alt text needed"}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </div>
-      <input
-        type="text"
-        value={file.alt}
-        onChange={(e) => onAltChange(id, e.target.value)}
-        placeholder="Alt text"
-        className="w-28 px-2 py-1 text-sm border rounded-md focus:outline-none focus:ring-2 focus:ring-ring"
-      />
+
+      {/* Action buttons */}
+      <div className="absolute bottom-1.5 right-1.5 flex opacity-0 group-hover:opacity-100 transition-opacity">
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="icon-xs"
+                variant="secondary"
+                onClick={() => onEditAlt(id)}
+                className="rounded-r-none"
+              >
+                <Edit2 className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              Edit alt text
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="icon-xs"
+                variant="secondary"
+                onClick={() => onRemove(id)}
+                className="rounded-l-none"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              Remove
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      </div>
     </div>
   );
 };
 
-const SortableItem = ({ id, file, config, media, onRemove, onAltChange }: { 
+const SortableItem = ({ 
+  id, 
+  file, 
+  config, 
+  media, 
+  onRemove, 
+  onEditAlt 
+}: { 
   id: string;
   file: { path: string; alt: string };
   config: any;
   media: string;
   onRemove: (id: string) => void;
-  onAltChange: (id: string, alt: string) => void;
+  onEditAlt: (id: string) => void;
 }) => {
   const {
     attributes,
@@ -114,13 +237,13 @@ const SortableItem = ({ id, file, config, media, onRemove, onAltChange }: {
 
   return (
     <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
-      <ImageWithAlt 
+      <ImageThumbnail 
         id={id}
         file={file}
         config={config}
         media={media}
         onRemove={onRemove}
-        onAltChange={onAltChange}
+        onEditAlt={onEditAlt}
       />
     </div>
   );
@@ -145,6 +268,8 @@ const EditComponent = forwardRef((props: any, ref: React.Ref<HTMLInputElement>) 
           }]
       : []
   );
+
+  const [editingFileId, setEditingFileId] = useState<string | null>(null);
 
   const mediaConfig = useMemo(() => {
     return (config?.object?.media?.length && field.options?.media !== false)
@@ -189,6 +314,11 @@ const EditComponent = forwardRef((props: any, ref: React.Ref<HTMLInputElement>) 
     [field.options?.multiple, files.length]
   );
 
+  const editingFile = useMemo(() => 
+    editingFileId ? files.find(f => f.id === editingFileId) : null,
+    [editingFileId, files]
+  );
+
   useEffect(() => {
     if (isMultiple) {
       onChange(files.map(f => ({ path: f.path, alt: f.alt })));
@@ -213,7 +343,11 @@ const EditComponent = forwardRef((props: any, ref: React.Ref<HTMLInputElement>) 
     setFiles(prev => prev.filter(file => file.id !== fileId));
   }, []);
 
-  const handleAltChange = useCallback((fileId: string, newAlt: string) => {
+  const handleEditAlt = useCallback((fileId: string) => {
+    setEditingFileId(fileId);
+  }, []);
+
+  const handleSaveAlt = useCallback((fileId: string, newAlt: string) => {
     setFiles(prev => prev.map(file => 
       file.id === fileId ? { ...file, alt: newAlt } : file
     ));
@@ -271,79 +405,92 @@ const EditComponent = forwardRef((props: any, ref: React.Ref<HTMLInputElement>) 
   }
 
   return (
-    <MediaUpload path={rootPath} media={mediaConfig.name} extensions={allowedExtensions || undefined} onUpload={handleUpload} multiple={isMultiple}>
-      <MediaUpload.DropZone>
-        <div className="space-y-2">
-          {files.length > 0 && (
-            isMultiple ? (
-              <div className="flex flex-wrap gap-2">
-                <DndContext 
-                  sensors={sensors}
-                  collisionDetection={closestCenter}
-                  onDragEnd={handleDragEnd}
-                >
-                  <SortableContext 
-                    items={files.map(f => f.id)}
-                    strategy={rectSortingStrategy}
+    <>
+      <MediaUpload path={rootPath} media={mediaConfig.name} extensions={allowedExtensions || undefined} onUpload={handleUpload} multiple={isMultiple}>
+        <MediaUpload.DropZone>
+          <div className="space-y-2">
+            {files.length > 0 && (
+              isMultiple ? (
+                <div className="flex flex-wrap gap-2">
+                  <DndContext 
+                    sensors={sensors}
+                    collisionDetection={closestCenter}
+                    onDragEnd={handleDragEnd}
                   >
-                    {files.map((file) => (
-                      <SortableItem 
-                        key={file.id}
-                        id={file.id}
-                        file={{ path: file.path, alt: file.alt }}
-                        config={config}
-                        media={mediaConfig.name}
-                        onRemove={handleRemove}
-                        onAltChange={handleAltChange}
-                      />
-                    ))}
-                  </SortableContext>
-                </DndContext>
+                    <SortableContext 
+                      items={files.map(f => f.id)}
+                      strategy={rectSortingStrategy}
+                    >
+                      {files.map((file) => (
+                        <SortableItem 
+                          key={file.id}
+                          id={file.id}
+                          file={{ path: file.path, alt: file.alt }}
+                          config={config}
+                          media={mediaConfig.name}
+                          onRemove={handleRemove}
+                          onEditAlt={handleEditAlt}
+                        />
+                      ))}
+                    </SortableContext>
+                  </DndContext>
+                </div>
+              ) : (
+                <ImageThumbnail 
+                  id={files[0].id}
+                  file={{ path: files[0].path, alt: files[0].alt }}
+                  config={config}
+                  media={mediaConfig.name}
+                  onRemove={handleRemove}
+                  onEditAlt={handleEditAlt}
+                />
+              )
+            )}
+            {remainingSlots > 0 && (
+              <div className="flex gap-2">
+                <MediaUpload.Trigger>
+                  <Button type="button" size="sm" variant="outline" className="gap-2">
+                    <Upload className="h-3.5 w-3.5"/>
+                    Upload
+                  </Button>
+                </MediaUpload.Trigger>
+                <TooltipProvider>
+                  <Tooltip>
+                    <MediaDialog
+                      media={mediaConfig.name}
+                      initialPath={rootPath}
+                      maxSelected={remainingSlots}
+                      extensions={allowedExtensions}
+                      onSubmit={handleSelected}
+                    >
+                      <TooltipTrigger asChild>
+                        <Button type="button" size="icon-sm" variant="outline">
+                          <FolderOpen className="h-3.5 w-3.5"/>
+                        </Button>
+                      </TooltipTrigger>
+                    </MediaDialog>
+                    <TooltipContent>
+                      Select from media
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               </div>
-            ) : (
-              <ImageWithAlt 
-                id={files[0].id}
-                file={{ path: files[0].path, alt: files[0].alt }}
-                config={config}
-                media={mediaConfig.name}
-                onRemove={handleRemove}
-                onAltChange={handleAltChange}
-              />
-            )
-          )}
-          {remainingSlots > 0 && (
-            <div className="flex gap-2">
-              <MediaUpload.Trigger>
-                <Button type="button" size="sm" variant="outline" className="gap-2">
-                  <Upload className="h-3.5 w-3.5"/>
-                  Upload
-                </Button>
-              </MediaUpload.Trigger>
-              <TooltipProvider>
-                <Tooltip>
-                  <MediaDialog
-                    media={mediaConfig.name}
-                    initialPath={rootPath}
-                    maxSelected={remainingSlots}
-                    extensions={allowedExtensions}
-                    onSubmit={handleSelected}
-                  >
-                    <TooltipTrigger asChild>
-                      <Button type="button" size="icon-sm" variant="outline">
-                        <FolderOpen className="h-3.5 w-3.5"/>
-                      </Button>
-                    </TooltipTrigger>
-                  </MediaDialog>
-                  <TooltipContent>
-                    Select from media
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            </div>
-          )}
-        </div>
-      </MediaUpload.DropZone>
-    </MediaUpload>
+            )}
+          </div>
+        </MediaUpload.DropZone>
+      </MediaUpload>
+
+      {editingFile && (
+        <AltTextModal
+          open={!!editingFileId}
+          onOpenChange={(open) => !open && setEditingFileId(null)}
+          file={editingFile}
+          onSave={(alt) => handleSaveAlt(editingFileId!, alt)}
+          imagePath={editingFile.path}
+          mediaName={mediaConfig.name}
+        />
+      )}
+    </>
   );
 });
 
