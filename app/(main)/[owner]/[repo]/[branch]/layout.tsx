@@ -32,9 +32,9 @@ export default async function Layout({
     version: "",
     object: {}
   }
-  
+
   let errorMessage = null;
-  
+
   // We try to retrieve the config file (.pages.yml)
   try {
     const octokit = createOctokitInstance(token);
@@ -63,7 +63,7 @@ export default async function Layout({
       const configFile = Buffer.from(response.data.content, "base64").toString();
       const parsedConfig = parseConfig(configFile);
       const configObject = normalizeConfig(parsedConfig.document.toJSON());
-      
+
       config.sha = response.data.sha;
       config.version = configVersion ?? "0.0";
       config.object = configObject;
@@ -104,8 +104,17 @@ export default async function Layout({
     }
   }
 
+  const customCssUrl = (config.object as any)?.custom_css_url;
+  const customJsUrl = (config.object as any)?.custom_js_url;
+
   return (
     <ConfigProvider value={config}>
+      {customCssUrl && (
+        <link rel="stylesheet" href={customCssUrl}>
+      )}
+      {customJsUrl && (
+        <script src={customJsUrl} defer></script>
+      )}
       <RepoLayout>{errorMessage ? errorMessage : children}</RepoLayout>
     </ConfigProvider>
   );
