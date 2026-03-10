@@ -110,7 +110,7 @@ export default async function Layout({
   return (
     <ConfigProvider value={config}>
       {customCssUrl && (
-        <link rel="stylesheet" href={customCssUrl}>
+        <link rel="stylesheet" href={customCssUrl} />
       )}
       {customJsUrl && (
         <script src={customJsUrl} defer></script>
