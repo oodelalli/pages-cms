@@ -2,7 +2,7 @@ import { z, ZodIssueCode } from "zod";
 import { ViewComponent } from "./view-component";
 import { EditComponent } from "./edit-component";
 import { Field } from "@/types/field";
-import { swapPrefix } from "@/lib/githubImage";
+import { swapPrefix } from "@/lib/github-image";
 import { getSchemaByName } from "@/lib/schema";
 import { getFileExtension, extensionCategories } from "@/lib/utils/file";
 
@@ -12,7 +12,7 @@ type ImageAltValue = { path: string; alt: string };
 const read = (value: any, field: Field, config: Record<string, any>): ImageAltValue | ImageAltValue[] | null => {
   if (!value) return null;
   if (Array.isArray(value) && !value.length) return null;
-  
+
   const mediaConfig = (config?.object?.media?.length && field.options?.media !== false)
     ? field.options?.media && typeof field.options.media === 'string'
       ? getSchemaByName(config.object, field.options.media, "media")
@@ -117,12 +117,12 @@ const schema = (field: Field, configObject?: Record<string, any>) => {
     if (isMultiple) {
       isEmpty = data === null || data === undefined || data.length === 0;
       if (Array.isArray(data) && data.length > 0) {
-        hasEmptyElementInArray = data.some(item => 
+        hasEmptyElementInArray = data.some(item =>
           typeof item === 'object' && (!item.path || item.path === "")
         );
       }
     } else {
-      isEmpty = data === null || data === undefined || 
+      isEmpty = data === null || data === undefined ||
         (typeof data === 'object' && (!data.path || data.path === ""));
     }
 
@@ -146,7 +146,7 @@ const schema = (field: Field, configObject?: Record<string, any>) => {
     // Path and extension checks
     const checkImageAlt = (item: unknown) => {
       if (typeof item !== 'object' || !item || !('path' in item)) return;
-      
+
       const path = (item as ImageAltValue).path;
       const alt = (item as ImageAltValue).alt;
 
@@ -154,12 +154,12 @@ const schema = (field: Field, configObject?: Record<string, any>) => {
 
       // Path Prefix Check
       if (mediaInputPath && !path.startsWith(mediaInputPath)) {
-        ctx.addIssue({ 
-          code: ZodIssueCode.custom, 
-          message: `Path must start with the media directory: ${mediaInputPath}` 
+        ctx.addIssue({
+          code: ZodIssueCode.custom,
+          message: `Path must start with the media directory: ${mediaInputPath}`
         });
       }
-      
+
       // Extension Check
       const fileExtension = getFileExtension(path);
       if (allowedExtensions && allowedExtensions.length > 0) {

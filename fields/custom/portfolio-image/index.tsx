@@ -2,7 +2,7 @@ import { z, ZodIssueCode } from "zod";
 import { ViewComponent } from "./view-component";
 import { EditComponent } from "./edit-component";
 import { Field } from "@/types/field";
-import { swapPrefix } from "@/lib/githubImage";
+import { swapPrefix } from "@/lib/github-image";
 import { getSchemaByName } from "@/lib/schema";
 import { getFileExtension, extensionCategories } from "@/lib/utils/file";
 
@@ -10,7 +10,7 @@ import { getFileExtension, extensionCategories } from "@/lib/utils/file";
 const read = (value: any, field: Field, config: Record<string, any>): string | string[] | null => {
   if (!value) return null;
   if (Array.isArray(value) && !value.length) return null;
-  
+
   const mediaConfig = (config?.object?.media?.length && field.options?.media !== false)
     ? field.options?.media && typeof field.options.media === 'string'
       ? getSchemaByName(config.object, field.options.media, "media")
@@ -124,7 +124,7 @@ const schema = (field: Field, configObject?: Record<string, any>) => {
       if (mediaInputPath && !path.startsWith(mediaInputPath)) {
         ctx.addIssue({ code: ZodIssueCode.custom, message: `Path must start with the media directory: ${mediaInputPath}` });
       }
-      
+
       // Extension Check
       const fileExtension = getFileExtension(path);
       if (allowedExtensions && allowedExtensions.length > 0) {
