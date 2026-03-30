@@ -3,12 +3,14 @@ export const maxDuration = 30;
 import { type NextRequest } from "next/server";
 import { readFns } from "@/fields/registry";
 import { parse } from "@/lib/serialization";
-import { deepMap, getDateFromFilename, getSchemaByName, safeAccess } from "@/lib/schema";
+import { deepMap, getDateFromFilename, getFieldByPath, getSchemaByName, safeAccess } from "@/lib/schema";
 import { getConfig } from "@/lib/utils/config";
 import { normalizePath } from "@/lib/utils/file";
-import { getAuth } from "@/lib/auth";
 import { getToken } from "@/lib/token";
-import { getCollectionCache, checkRepoAccess } from "@/lib/githubCache";
+import { getCollectionCache, checkRepoAccess } from "@/lib/github-cache";
+import { getGithubId } from "@/lib/github-account";
+import { createHttpError, toErrorResponse } from "@/lib/api-error";
+import { requireApiUserSession } from "@/lib/session-server";
 
 /**
  * Fetches and parses collection contents from GitHub repositories
@@ -22,25 +24,30 @@ import { getCollectionCache, checkRepoAccess } from "@/lib/githubCache";
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { owner: string, repo: string, branch: string, name: string } }
+  context: { params: Promise<{ owner: string, repo: string, branch: string, name: string }> }
 ) {
   try {
-    const { user, session } = await getAuth();
-    if (!session) return new Response(null, { status: 401 });
+    const params = await context.params;
+    const sessionResult = await requireApiUserSession();
+    if ("response" in sessionResult) return sessionResult.response;
+    const user = sessionResult.user;
 
-    const token = await getToken(user, params.owner, params.repo);
-    if (!token) throw new Error("Token not found");
+    const { token } = await getToken(user, params.owner, params.repo);
+    if (!token) throw createHttpError("Token not found", 401);
 
-    if (user.githubId) {
-      const hasAccess = await checkRepoAccess(token, params.owner, params.repo, user.githubId);
-      if (!hasAccess) throw new Error(`No access to repository ${params.owner}/${params.repo}.`);
+    const githubId = await getGithubId(user.id);
+    if (githubId) {
+      const hasAccess = await checkRepoAccess(token, params.owner, params.repo, githubId);
+      if (!hasAccess) throw createHttpError(`No access to repository ${params.owner}/${params.repo}.`, 403);
     }
 
-    const config = await getConfig(params.owner, params.repo, params.branch);
-    if (!config) throw new Error(`Configuration not found for ${params.owner}/${params.repo}/${params.branch}.`);
+    const config = await getConfig(params.owner, params.repo, params.branch, {
+      getToken: async () => token,
+    });
+    if (!config) throw createHttpError(`Configuration not found for ${params.owner}/${params.repo}/${params.branch}.`, 404);
 
     const schema = getSchemaByName(config.object, params.name);
-    if (!schema) throw new Error(`Schema not found for ${params.name}.`);
+    if (!schema) throw createHttpError(`Schema not found for ${params.name}.`, 404);
 
     const searchParams = request.nextUrl.searchParams;
     const path = searchParams.get("path") || "";
@@ -49,10 +56,10 @@ export async function GET(
     const fields = searchParams.get("fields")?.split(",") || ["name"];
 
     const normalizedPath = normalizePath(path);
-    if (!normalizedPath.startsWith(schema.path)) throw new Error(`Invalid path "${path}" for collection "${params.name}".`);
+    if (!normalizedPath.startsWith(schema.path)) throw createHttpError(`Invalid path "${path}" for collection "${params.name}".`, 400);
 
     if (schema.subfolders === false) {
-      if (normalizedPath !== schema.path) throw new Error(`Invalid path "${path}" for collection "${params.name}".`);
+      if (normalizedPath !== schema.path) throw createHttpError(`Invalid path "${path}" for collection "${params.name}".`, 400);
     }
 
     let entries = await getCollectionCache(params.owner, params.repo, params.branch, normalizedPath, token, schema.view?.node?.filename);
@@ -87,7 +94,7 @@ export async function GET(
     }
     
     if (entries) {
-      data = parseContents(entries, schema, config);
+      data = parseContents(entries, schema, config, fields);
       
       // If this is a search request, filter the contents
       if (type === "search" && query) {
@@ -130,10 +137,7 @@ export async function GET(
     });
   } catch (error: any) {
     console.error(error);
-    return Response.json({
-      status: "error",
-      message: error.message,
-    });
+    return toErrorResponse(error);
   }
 }
 
@@ -142,6 +146,7 @@ const parseContents = (
   contents: any,
   schema: Record<string, any>,
   config: Record<string, any>,
+  selectedFields?: string[],
 ): {
   contents: Record<string, any>[],
   errors: string[]
@@ -160,14 +165,21 @@ const parseContents = (
       if (serializedTypes.includes(schema.format) && schema.fields) {
         // If we are dealing with a serialized format and we have fields defined
         try {
-          contentObject = parse(item.content, { format: schema.format, delimiters: schema.delimiters });
-          // TODO: review if this works for blocks
-          contentObject = deepMap(contentObject, schema.fields, (value, field) => {
-            if (typeof field.type === 'string' && readFns[field.type]) {
-              return readFns[field.type](value, field, config);
-            }
-            return value;
-          });
+          const parsedObject = parse(item.content, { format: schema.format, delimiters: schema.delimiters });
+          if (Array.isArray(selectedFields) && selectedFields.length > 0) {
+            const requestedFieldPaths = selectedFields
+              .filter((fieldPath) => fieldPath !== "path")
+              .map((fieldPath) => fieldPath.startsWith("fields.") ? fieldPath.replace(/^fields\./, "") : fieldPath);
+            contentObject = pickAndTransformFields(parsedObject, schema.fields, requestedFieldPaths, config);
+          } else {
+            // TODO: review if this works for blocks
+            contentObject = deepMap(parsedObject, schema.fields, (value, field) => {
+              if (typeof field.type === "string" && readFns[field.type]) {
+                return readFns[field.type](value, field, config);
+              }
+              return value;
+            });
+          }
         } catch (error: any) {
           // TODO: send this to the client?
           console.error(`Error parsing frontmatter for file "${item.path}": ${error.message}`);
@@ -216,3 +228,43 @@ const parseContents = (
     errors: parsedErrors
   }
 }
+
+const pickAndTransformFields = (
+  parsedObject: Record<string, any>,
+  schemaFields: any[],
+  fieldPaths: string[],
+  config: Record<string, any>,
+) => {
+  const output: Record<string, any> = {};
+  const dedupedPaths = Array.from(new Set(fieldPaths));
+
+  dedupedPaths.forEach((fieldPath) => {
+    const field = getFieldByPath(schemaFields, fieldPath);
+    if (!field) return;
+
+    let value = safeAccess(parsedObject, fieldPath);
+    if (typeof field.type === "string" && readFns[field.type]) {
+      const transformedValue = readFns[field.type](value, field, config);
+      if (transformedValue !== undefined) value = transformedValue;
+    }
+    setByPath(output, fieldPath, value);
+  });
+
+  return output;
+};
+
+const setByPath = (target: Record<string, any>, path: string, value: any) => {
+  if (!path) return;
+  const segments = path.split(".");
+  let cursor: Record<string, any> = target;
+
+  for (let i = 0; i < segments.length - 1; i++) {
+    const key = segments[i];
+    if (cursor[key] == null || typeof cursor[key] !== "object" || Array.isArray(cursor[key])) {
+      cursor[key] = {};
+    }
+    cursor = cursor[key];
+  }
+
+  cursor[segments[segments.length - 1]] = value;
+};

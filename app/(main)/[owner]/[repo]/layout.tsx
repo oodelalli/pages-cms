@@ -1,63 +1,55 @@
-import { redirect} from "next/navigation";
-import { createOctokitInstance } from "@/lib/utils/octokit";
-import { getAuth } from "@/lib/auth";
+import { redirect } from "next/navigation";
+import { headers } from "next/headers";
 import { getToken } from "@/lib/token";
 import { RepoProvider } from "@/contexts/repo-context";
-import { Message } from "@/components/message";
-import { Repo } from "@/types/repo";
+import { getServerSession } from "@/lib/session-server";
+import { getRepoSnapshot } from "@/lib/github-cache";
+import { GithubAuthExpired } from "@/components/github-auth-expired";
+import { isGithubAuthError } from "@/lib/github-auth";
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import Link from "next/link";
+import { buttonVariants } from "@/components/ui/button";
 
 export default async function Layout({
   children,
-  params: { owner, repo }
+  params
 }: {
   children: React.ReactNode;
-  params: { owner: string; repo: string; };
+  params: Promise<{ owner: string; repo: string; }>;
 }) {
-  const { session, user } = await getAuth();
-  if (!session) return redirect("/sign-in");
-
-  const token = await getToken(user, owner, repo);
-  if (!token) throw new Error("Token not found");
+  const { owner, repo } = await params;
+  const requestHeaders = await headers();
+  const session = await getServerSession();
+  const user = session?.user;
+  const returnTo = requestHeaders.get("x-return-to");
+  const signInUrl =
+    returnTo && returnTo !== "/sign-in"
+      ? `/sign-in?redirect=${encodeURIComponent(returnTo)}`
+      : "/sign-in";
+  if (!user) return redirect(signInUrl);
 
   try {
-    const octokit = createOctokitInstance(token);
-    const repoResponse = await octokit.rest.repos.get({ owner: owner, repo: repo });
-    
-    let branches = [];
-    let hasMore = true;
-    let page = 1;
+    const { token } = await getToken(user, owner, repo);
+    if (!token) throw new Error("Token not found");
 
-    while (hasMore) {
-      const branchesResponse = await octokit.rest.repos.listBranches({ owner, repo, page: page, per_page: 100 });
-      if (branchesResponse.data.length === 0) break;
-      branches.push(...branchesResponse.data);
-      hasMore = (branchesResponse.data.length === 100);
-      page++;
-    }
-
-    const branchNames = branches.map(branch => branch.name);
+    const repoInfo = await getRepoSnapshot(owner, repo, token);
+    const branchNames = repoInfo.branches ?? [];
     
     if (branchNames.length === 0) {
       return(
-        <Message
-          title="This repository is empty."
-          description={`You need to create a branch and add a ".pages.yml" file to configure it.`}
-          className="absolute inset-0"
-          cta="Select another repository"
-          href="/"
-        />
+        <Empty className="absolute inset-0 border-0 rounded-none">
+          <EmptyHeader>
+            <EmptyTitle>Empty repository</EmptyTitle>
+            <EmptyDescription>Create a branch and add a &quot;.pages.yml&quot; file to configure this repository.</EmptyDescription>
+          </EmptyHeader>
+          <EmptyContent>
+            <Link className={buttonVariants({ variant: "default", size: "sm" })} href="/">
+              Choose another repository
+            </Link>
+          </EmptyContent>
+        </Empty>
       );
     }
-
-    const repoInfo: Repo = {
-      id: repoResponse.data.id,
-      owner: repoResponse.data.owner.login,
-      ownerId: repoResponse.data.owner.id,
-      repo: repoResponse.data.name,
-      defaultBranch: repoResponse.data.default_branch,
-      branches: branchNames,
-      isPrivate: repoResponse.data.private
-    };
 
     return (
       <RepoProvider repo={repoInfo}>
@@ -65,27 +57,39 @@ export default async function Layout({
       </RepoProvider>
     );
   } catch (error: any) {
+    if (isGithubAuthError(error)) {
+      return <GithubAuthExpired />;
+    }
+
     switch (error.status) {
       case 404:
         // TODO: adjust as it may be the permissions as insufficient (suggest installing the app)
         return(
-          <Message
-            title="This repository doesn't exist."
-            description={<>It may have been removed, renamed or the path may be wrong.</>}
-            className="absolute inset-0"
-            cta="Select another repository"
-            href="/"
-          />
+          <Empty className="absolute inset-0 border-0 rounded-none">
+            <EmptyHeader>
+              <EmptyTitle>Repository not found</EmptyTitle>
+              <EmptyDescription>It may have been removed, renamed, or the URL may be incorrect.</EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Link className={buttonVariants({ variant: "default", size: "sm" })} href="/">
+                Choose another repository
+              </Link>
+            </EmptyContent>
+          </Empty>
         ); 
       case 403:
         return(
-          <Message
-            title="You can't access this repository."
-            description={<>You do not have the sufficient permissions to access this repository.</>}
-            className="absolute inset-0"
-            cta="Select another repository"
-            href="/"
-          />
+          <Empty className="absolute inset-0 border-0 rounded-none">
+            <EmptyHeader>
+              <EmptyTitle>Access denied</EmptyTitle>
+              <EmptyDescription>You do not have permission to access this repository.</EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Link className={buttonVariants({ variant: "default", size: "sm" })} href="/">
+                Choose another repository
+              </Link>
+            </EmptyContent>
+          </Empty>
         ); 
       default:
         throw error;

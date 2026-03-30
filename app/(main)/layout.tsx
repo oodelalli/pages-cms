@@ -1,22 +1,41 @@
 import { redirect } from "next/navigation";
-import { getAuth } from "@/lib/auth";
+import { headers } from "next/headers";
 import { getAccounts } from "@/lib/utils/accounts";
-import { Providers } from "@/components/providers";
+import { UserProvider } from "@/contexts/user-context";
+import { User } from "@/types/user";
+import { getServerSession } from "@/lib/session-server";
+import { GithubAuthExpired } from "@/components/github-auth-expired";
+import { isGithubAuthError } from "@/lib/github-auth";
 
 export default async function Layout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const { session, user } = await getAuth();
-  if (!session) return redirect("/sign-in");
+  const requestHeaders = await headers();
+  const session = await getServerSession();
+  const returnTo = requestHeaders.get("x-return-to");
+  const signInUrl =
+    returnTo && returnTo !== "/sign-in"
+      ? `/sign-in?redirect=${encodeURIComponent(returnTo)}`
+      : "/sign-in";
+  if (!session?.user) return redirect(signInUrl);
 
-  const accounts = await getAccounts(user);
-  const userWithAccounts = { ...user, accounts };
+  let accounts;
+  try {
+    accounts = await getAccounts(session.user as User);
+  } catch (error) {
+    if (isGithubAuthError(error)) {
+      return <GithubAuthExpired />;
+    }
+    throw error;
+  }
+
+  const userWithAccounts = { ...session.user, accounts };
   
 	return (
-    <Providers user={userWithAccounts}>
+    <UserProvider user={userWithAccounts}>
       {children}
-    </Providers>
+    </UserProvider>
   );
 }

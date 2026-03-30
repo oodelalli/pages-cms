@@ -4,83 +4,105 @@ import { forwardRef, useCallback, useState, useEffect, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { MediaUpload } from "@/components/media/media-upload";
 import { MediaDialog } from "@/components/media/media-dialog";
-import { Trash2, Upload, FolderOpen, ArrowUpRight } from "lucide-react";
+import { Upload, FolderOpen, ArrowUpRight, EllipsisVertical } from "lucide-react";
 import { useConfig } from "@/contexts/config-context";
-import { extensionCategories, normalizePath } from "@/lib/utils/file";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
-import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
-import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, rectSortingStrategy } from '@dnd-kit/sortable';
+import { normalizeMediaPath, normalizePath } from "@/lib/utils/file";
+import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
+import { arrayMove, SortableContext, sortableKeyboardCoordinates, rectSortingStrategy } from '@dnd-kit/sortable';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { v4 as uuidv4 } from 'uuid';
 import { getSchemaByName } from "@/lib/schema";
-import { cn } from "@/lib/utils";
-import { buttonVariants } from "@/components/ui/button";
 import { Thumbnail } from "@/components/thumbnail";
 import { getAllowedExtensions } from "./index";
+import type { Config } from "@/types/config";
+import type { Field } from "@/types/field";
+import type { FileSaveData } from "@/types/api";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
-const generateId = () => uuidv4().slice(0, 8);
+const generateId = () => crypto.randomUUID().replace(/-/g, "").slice(0, 8);
 
-const ImageTeaser = ({ file, config, media, onRemove }: { 
+type FileEntry = {
+  id: string;
+  path: string;
+};
+
+type MediaSchema = {
+  name: string;
+  input: string;
+  extensions?: string[];
+  rename?: boolean;
+};
+
+type EditorProps = {
+  value?: string | string[] | null;
+  field: Field;
+  onChange: (value: string | string[]) => void;
+};
+
+type FieldOptions = {
+  media?: false | string;
+  path?: string;
+  multiple?: boolean | { max?: number };
+  rename?: boolean;
+};
+
+const ImageTeaser = ({ file, config, onRemove }: { 
   file: string;
-  config: any;
-  media: string;
-  onRemove: (file: string) => void;
+  config: Pick<Config, "owner" | "repo" | "branch">;
+  onRemove?: () => void;
 }) => {
   return (
     <>
-      <div className="absolute bottom-1.5 right-1.5">
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
+      <div className="absolute bottom-1 right-1 bg-background rounded-md">
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button type="button" variant="ghost" size="icon-xs" className="text-muted-foreground hover:text-foreground">
+              <EllipsisVertical />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem asChild>
               <a
                 href={`https://github.com/${config.owner}/${config.repo}/blob/${config.branch}/${file}`}
                 target="_blank"
-                className={cn(buttonVariants({ variant: "secondary", size: "icon-xs" }), "rounded-r-none")}
+                rel="noopener noreferrer"
+                className="w-full"
               >
-                <ArrowUpRight className="h-4 w-4" />
+                View on GitHub
+                <ArrowUpRight className="size-3 ml-auto" />
               </a>
-            </TooltipTrigger>
-            <TooltipContent>
-              See on GitHub
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                size="icon-xs"
-                variant="secondary"
-                onClick={() => onRemove(file)}
-                className="rounded-l-none"
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              Remove
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+            </DropdownMenuItem>
+            {onRemove && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  variant="destructive"
+                  onSelect={onRemove}
+                >
+                  Remove
+                </DropdownMenuItem>
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </>
   )
 };
 
-const SortableItem = ({ id, file, config, media, onRemove }: { 
+const SortableItem = ({ id, file, config, media, onRemove, readonly = false }: { 
   id: string;
   file: string;
-  config: any;
+  config: Pick<Config, "owner" | "repo" | "branch">;
   media: string;
-  onRemove: (file: string) => void;
+  onRemove?: () => void;
+  readonly?: boolean;
 }) => {
   const {
     attributes,
@@ -101,68 +123,73 @@ const SortableItem = ({ id, file, config, media, onRemove }: {
 
   return (
     <div ref={setNodeRef} style={style}>
-      <div {...attributes} {...listeners}>
+      <div title={file} className={readonly ? undefined : "cursor-move"} {...(!readonly ? attributes : {})} {...(!readonly ? listeners : {})}>
         <Thumbnail name={media} path={file} className="rounded-md w-28 h-28"/>
       </div>
-      <ImageTeaser file={file} config={config} onRemove={onRemove} media={media} />
+      <ImageTeaser file={file} config={config} onRemove={onRemove} />
     </div>
   );
 };
 
-const EditComponent = forwardRef((props: any, ref: React.Ref<HTMLInputElement>) => {
+const EditComponent = forwardRef((props: EditorProps, ref: React.Ref<HTMLInputElement>) => {
   const { value, field, onChange } = props;
+  void ref;
   const { config } = useConfig();
+  if (!config) throw new Error("Configuration not found.");
+  const options = (field.options ?? {}) as FieldOptions;
+  const isReadonly = Boolean(field.readonly);
   
-  const [files, setFiles] = useState<Array<{ id: string, path: string }>>(() => 
-    value
-      ? Array.isArray(value)
-        ? value.map(path => ({ id: generateId(), path }))
-        : [{ id: generateId(), path: value }]
-      : []
+  const [files, setFiles] = useState<FileEntry[]>(() => 
+    typeof value === "string"
+      ? (value.trim()
+        ? [{ id: generateId(), path: normalizeMediaPath(value) }]
+        : [])
+      : Array.isArray(value)
+        ? value
+            .filter((path): path is string => typeof path === "string" && path.trim().length > 0)
+            .map((path) => ({ id: generateId(), path: normalizeMediaPath(path) }))
+        : []
   );
 
-  const mediaConfig = useMemo(() => {
-    return (config?.object?.media?.length && field.options?.media !== false)
-      ? field.options?.media && typeof field.options.media === 'string'
-        ? getSchemaByName(config.object, field.options.media, "media")
-        : config.object.media[0]
+  const mediaConfig = useMemo<MediaSchema | undefined>(() => {
+    return (config.object?.media?.length && options.media !== false)
+      ? options.media && typeof options.media === 'string'
+        ? getSchemaByName(config.object, options.media, "media") as MediaSchema | undefined
+        : config.object.media[0] as MediaSchema
       : undefined;
-  }, [field.options?.media, config?.object]);
+  }, [config.object, options.media]);
 
   const rootPath = useMemo(() => {
-    if (!field.options?.path) {
+    if (!options.path) {
       return mediaConfig?.input;
     }
 
-    const normalizedPath = normalizePath(field.options.path);
-    const normalizedMediaPath = normalizePath(mediaConfig?.input);
+    const mediaRoot = mediaConfig?.input;
+    if (!mediaRoot) {
+      return normalizePath(options.path);
+    }
+
+    const normalizedPath = normalizePath(options.path);
+    const normalizedMediaPath = normalizePath(mediaRoot);
 
     if (!normalizedPath.startsWith(normalizedMediaPath)) {
-      console.warn(`"${field.options.path}" is not within media root "${mediaConfig?.input}". Defaulting to media root.`);
-      return mediaConfig?.input;
+      console.warn(`"${options.path}" is not within media root "${mediaRoot}". Defaulting to media root.`);
+      return mediaRoot;
     }
 
     return normalizedPath;
-  }, [field.options?.path, mediaConfig?.input]);
+  }, [options.path, mediaConfig?.input]);
 
   const allowedExtensions = useMemo(() => {
     if (!mediaConfig) return [];
     return getAllowedExtensions(field, mediaConfig);
   }, [field, mediaConfig]);
 
-  const isMultiple = useMemo(() => 
-    !!field.options?.multiple,
-    [field.options?.multiple]
-  );
-
-  const remainingSlots = useMemo(() => 
-    field.options?.multiple
-      ? (typeof field.options.multiple === 'object' && field.options.multiple.max)
-        ? field.options.multiple.max - files.length
-        : Infinity
-      : 1 - files.length,
-    [field.options?.multiple, files.length]
-  );
+  const isMultiple = !!options.multiple;
+  const maxFiles = typeof options.multiple === "object" && options.multiple !== null && typeof options.multiple.max === "number"
+    ? options.multiple.max
+    : isMultiple ? undefined : 1;
+  const remainingSlots = (maxFiles ?? Infinity) - files.length;
 
   useEffect(() => {
     if (isMultiple) {
@@ -172,17 +199,21 @@ const EditComponent = forwardRef((props: any, ref: React.Ref<HTMLInputElement>) 
     }
   }, [files, isMultiple, onChange]);
 
-  const handleUpload = useCallback((fileData: any) => {
-    if (!config) return;
-    
-    const newFile = { id: generateId(), path: fileData.path };
-    
+  const handleUpload = useCallback((fileData: FileSaveData) => {
+    if (!fileData.path) return;
+
+    const normalizedPath = normalizeMediaPath(fileData.path);
+
     if (isMultiple) {
-      setFiles(prev => [...prev, newFile]);
+      setFiles((prev) => {
+        const next = [...prev, { id: generateId(), path: normalizedPath }];
+        if (typeof maxFiles !== "number") return next;
+        return next.slice(0, maxFiles);
+      });
     } else {
-      setFiles([newFile]);
+      setFiles([{ id: generateId(), path: normalizedPath }]);
     }
-  }, [isMultiple, config]);
+  }, [isMultiple, maxFiles]);
 
   const handleRemove = useCallback((fileId: string) => {
     setFiles(prev => prev.filter(file => file.id !== fileId));
@@ -195,8 +226,10 @@ const EditComponent = forwardRef((props: any, ref: React.Ref<HTMLInputElement>) 
     })
   );
 
-  const handleDragEnd = (event: any) => {
+  const handleDragEnd = (event: DragEndEvent) => {
+    if (isReadonly) return;
     const { active, over } = event;
+    if (!over) return;
 
     if (active.id !== over.id) {
       setFiles((items) => {
@@ -208,28 +241,30 @@ const EditComponent = forwardRef((props: any, ref: React.Ref<HTMLInputElement>) 
   };
 
   const handleSelected = useCallback((newPaths: string[]) => {
-    if (newPaths.length === 0) {
-      setFiles([]);
-    } else {
-      const newFiles = newPaths.map(path => ({
-        id: generateId(),
-        path
-      }));
-      
-      if (isMultiple) {
-        setFiles(prev => [...prev, ...newFiles]);
-      } else {
-        setFiles([newFiles[0]]);
-      }
+    const normalizedPaths = newPaths.map((path) => normalizeMediaPath(path));
+
+    if (!isMultiple) {
+      const firstPath = normalizedPaths[0];
+      setFiles(firstPath ? [{ id: generateId(), path: firstPath }] : []);
+      return;
     }
-  }, [isMultiple]);
+
+    setFiles((prev) => {
+      const next = [
+        ...prev,
+        ...normalizedPaths.map((path) => ({ id: generateId(), path })),
+      ];
+      if (typeof maxFiles !== "number") return next;
+      return next.slice(0, maxFiles);
+    });
+  }, [isMultiple, maxFiles]);
 
   if (!mediaConfig) {
     return (
       <p className="text-muted-foreground bg-muted rounded-md px-3 py-2">
       No media configuration found. {' '}
       <a 
-        href={`/${config?.owner}/${config?.repo}/${encodeURIComponent(config?.branch || "")}/settings`}
+        href={`/${config.owner}/${config.repo}/${encodeURIComponent(config.branch || "")}/settings`}
         className="underline hover:text-foreground"
       >
         Check your settings
@@ -239,7 +274,15 @@ const EditComponent = forwardRef((props: any, ref: React.Ref<HTMLInputElement>) 
   }
 
   return (
-    <MediaUpload path={rootPath} media={mediaConfig.name} extensions={allowedExtensions || undefined} onUpload={handleUpload} multiple={isMultiple}>
+    <MediaUpload
+      path={rootPath}
+      media={mediaConfig.name}
+      extensions={allowedExtensions || undefined}
+      onUpload={handleUpload}
+      multiple={isMultiple}
+      rename={options.rename ?? mediaConfig.rename}
+      disabled={isReadonly}
+    >
       <MediaUpload.DropZone>
         <div className="space-y-2">
           {files.length > 0 && (
@@ -261,7 +304,8 @@ const EditComponent = forwardRef((props: any, ref: React.Ref<HTMLInputElement>) 
                         file={file.path}
                         config={config}
                         media={mediaConfig.name}
-                        onRemove={() => handleRemove(file.id)}
+                        onRemove={isReadonly ? undefined : () => handleRemove(file.id)}
+                        readonly={isReadonly}
                       />
                     ))}
                   </SortableContext>
@@ -269,12 +313,14 @@ const EditComponent = forwardRef((props: any, ref: React.Ref<HTMLInputElement>) 
               </div>
             ) : (
               <div className="aspect-square w-28 relative">
-                <Thumbnail name={mediaConfig.name} path={files[0].path} className="rounded-md w-28 h-28"/>
-                <ImageTeaser file={files[0].path} config={config} media={mediaConfig.name} onRemove={() => handleRemove(files[0].id)} />
+                <div title={files[0].path}>
+                  <Thumbnail name={mediaConfig.name} path={files[0].path} className="rounded-md w-28 h-28"/>
+                </div>
+                <ImageTeaser file={files[0].path} config={config} onRemove={isReadonly ? undefined : () => handleRemove(files[0].id)} />
               </div>
             )
           )}
-          {remainingSlots > 0 && (
+          {!isReadonly && remainingSlots > 0 && (
             <div className="flex gap-2">
               <MediaUpload.Trigger>
                 <Button type="button" size="sm" variant="outline" className="gap-2">
@@ -282,26 +328,18 @@ const EditComponent = forwardRef((props: any, ref: React.Ref<HTMLInputElement>) 
                   Upload
                 </Button>
               </MediaUpload.Trigger>
-              <TooltipProvider>
-                <Tooltip>
-                  <MediaDialog
-                    media={mediaConfig.name}
-                    initialPath={rootPath}
-                    maxSelected={remainingSlots}
-                    extensions={allowedExtensions}
-                    onSubmit={handleSelected}
-                  >
-                    <TooltipTrigger asChild>
-                      <Button type="button" size="icon-sm" variant="outline">
-                        <FolderOpen className="h-3.5 w-3.5"/>
-                      </Button>
-                    </TooltipTrigger>
-                  </MediaDialog>
-                  <TooltipContent>
-                    Select from media
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+              <MediaDialog
+                media={mediaConfig.name}
+                initialPath={rootPath}
+                maxSelected={remainingSlots}
+                extensions={allowedExtensions}
+                onSubmit={handleSelected}
+              >
+                  <Button type="button" size="sm" variant="outline">
+                    <FolderOpen />
+                    Select
+                  </Button>
+              </MediaDialog>
             </div>
           )}
         </div>

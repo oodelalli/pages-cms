@@ -1,27 +1,49 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { Fragment, memo, startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import { useConfig } from "@/contexts/config-context";
 import {
   extensionCategories,
-  sortFiles,
   getFileSize,
   getParentPath,
   getFileName,
+  getRelativePath,
+  joinPathSegments,
   normalizePath
 } from "@/lib/utils/file";
-import { EmptyCreate } from "@/components/empty-create";
 import { FolderCreate} from "@/components/folder-create";
 import { FileOptions } from "@/components/file/file-options";
-import { PathBreadcrumb } from "@/components/path-breadcrumb";
+import { useOptionalRepoHeader } from "@/components/repo/repo-header-context";
 import { MediaUpload} from "./media-upload";
-import { Message } from "@/components/message";
 import { Thumbnail } from "@/components/thumbnail";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import {
+  Breadcrumb,
+  BreadcrumbEllipsis,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
+import { requireApiSuccess } from "@/lib/api-client";
+import type { FileSaveData, MediaItem } from "@/types/api";
+import useSWR, { useSWRConfig } from "swr";
 import {
   CornerLeftUp,
+  House,
   Ban,
   Check,
   EllipsisVertical,  
@@ -31,6 +53,140 @@ import {
   Upload
 } from "lucide-react";
 
+function MediaHeaderActions({
+  mediaName,
+  path,
+  onFolderCreate,
+}: {
+  mediaName: string;
+  path: string;
+  onFolderCreate: (entry: unknown) => void;
+}) {
+  return (
+    <div className="flex items-center gap-x-2 shrink-0">
+      <MediaUpload.Trigger>
+        <Button type="button" size="sm" className="gap-2">
+          <Upload />
+          Upload
+        </Button>
+      </MediaUpload.Trigger>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div>
+            <FolderCreate path={path} name={mediaName} type="media" onCreate={onFolderCreate}>
+              <Button type="button" variant="outline" size="icon-sm">
+                <FolderPlus />
+              </Button>
+            </FolderCreate>
+          </div>
+        </TooltipTrigger>
+        <TooltipContent>Create folder</TooltipContent>
+      </Tooltip>
+    </div>
+  );
+}
+
+type MediaFolderTileProps = {
+  item: MediaItem;
+  onNavigate: (path: string) => void;
+};
+
+const MediaFolderTile = memo(function MediaFolderTile({ item, onNavigate }: MediaFolderTileProps) {
+  return (
+    <button
+      className="hover:bg-muted focus:ring-offset-background focus:ring-2 focus:ring-ring focus:ring-offset-2 outline-none rounded-md block w-full"
+      onClick={() => onNavigate(item.path)}
+    >
+      <div className="flex items-center justify-center aspect-video">
+        <Folder className="stroke-[0.5] h-[5.5rem] w-[5.5rem]"/>
+      </div>
+      <div className="flex items-center justify-center p-2">
+        <div className="overflow-hidden h-9">
+          <div className="text-sm font-medium truncate">{item.name}</div>
+        </div>
+      </div>
+    </button>
+  );
+});
+
+type MediaFileTileProps = {
+  item: MediaItem;
+  mediaName: string;
+  selectable: boolean;
+  isSelected: boolean;
+  isImage: boolean;
+  displaySize: string;
+  portalContainer: HTMLDivElement | null;
+  onSelect: (path: string) => void;
+  onDelete: (path: string) => void;
+  onRename: (path: string, newPath: string) => void;
+};
+
+const MediaFileTile = memo(function MediaFileTile({
+  item,
+  mediaName,
+  selectable,
+  isSelected,
+  isImage,
+  displaySize,
+  portalContainer,
+  onSelect,
+  onDelete,
+  onRename,
+}: MediaFileTileProps) {
+  const content = (
+    <div className={cn(
+      "relative rounded-md",
+      selectable && "hover:bg-muted peer-focus:ring-offset-background peer-focus:ring-2 peer-focus:ring-ring peer-focus:ring-offset-2 peer-checked:ring-offset-background peer-checked:ring-offset-2 peer-checked:ring-2 peer-checked:ring-ring",
+    )}>
+      {isImage
+        ? <Thumbnail name={mediaName} path={item.path} className="rounded-t-md aspect-video"/>
+        : <div className="flex items-center justify-center rounded-md aspect-video">
+            <File className="stroke-[0.5] h-24 w-24"/>
+          </div>
+      }
+      <div className="flex gap-x-2 items-center pt-2">
+        <div className="overflow-hidden mr-auto h-9">
+          <div className="text-sm font-medium truncate">{item.name}</div>
+          <div className="text-xs text-muted-foreground truncate">{displaySize}</div>
+        </div>
+        <FileOptions
+          path={item.path}
+          sha={item.sha || ""}
+          type="media"
+          name={mediaName}
+          onDelete={onDelete}
+          onRename={onRename}
+          portalProps={{ container: portalContainer }}
+        >
+          <Button variant="ghost" size="icon-xs" className="shrink-0 self-start">
+            <EllipsisVertical />
+          </Button>
+        </FileOptions>
+      </div>
+      {selectable && isSelected && (
+        <div className="text-primary-foreground bg-primary p-0.5 rounded-full absolute top-2 left-2">
+          <Check className="stroke-[3] w-3 h-3"/>
+        </div>
+      )}
+    </div>
+  );
+
+  if (!selectable) return content;
+
+  return (
+    <label>
+      <input
+        type="checkbox"
+        className="peer sr-only"
+        checked={isSelected}
+        onChange={() => onSelect(item.path)}
+      />
+      {content}
+    </label>
+  );
+});
+
 const MediaView = ({
   media,
   initialPath,
@@ -38,25 +194,27 @@ const MediaView = ({
   maxSelected,
   onSelect,
   onUpload,
-  extensions
+  extensions,
+  usePageHeader = true,
 }: {
   media: string,
   initialPath?: string,
   initialSelected?: string[],
   maxSelected?: number,
   onSelect?: (newSelected: string[]) => void,
-  onUpload?: (entry: any) => void,
-  extensions?: string[]
+  onUpload?: (entry: FileSaveData) => void,
+  extensions?: string[],
+  usePageHeader?: boolean,
 }) => {
   const { config } = useConfig();
   if (!config) throw new Error(`Configuration not found.`);
+  const { mutate } = useSWRConfig();
 
   const mediaConfig = useMemo(() => {
     if (!media) return config.object.media[0];
-    return config.object.media.find((item: any) => item.name === media);
+    return config.object.media.find((item: { name: string }) => item.name === media);
   }, [media, config.object.media]);
 
-  const searchParams = useSearchParams();
   const pathname = usePathname();
   const router = useRouter();
 
@@ -71,6 +229,16 @@ const MediaView = ({
 
     return allowedExtensions || [];
   }, [extensions, mediaConfig?.extensions]);
+
+  const filteredExtensionsSet = useMemo(
+    () => new Set((filteredExtensions || []).map((ext: string) => ext.toLowerCase())),
+    [filteredExtensions],
+  );
+
+  const imageExtensionsSet = useMemo(
+    () => new Set(extensionCategories.image),
+    [],
+  );
 
   const filesGridRef = useRef<HTMLDivElement | null>(null);
 
@@ -89,96 +257,162 @@ const MediaView = ({
     console.warn(`"${initialPath}" is not within media root "${mediaConfig.input}". Defaulting to media root.`);
     return mediaConfig.input;
   });
-  const [data, setData] = useState<Record<string, any>[] | undefined>(undefined);
+  const [data, setData] = useState<MediaItem[] | undefined>(undefined);
   
   // Filter the data based on filteredExtensions when displaying
   const filteredData = useMemo(() => {
     if (!data) return undefined;
-    if (!filteredExtensions || filteredExtensions.length === 0) return data;
+    if (filteredExtensionsSet.size === 0) return data;
     return data.filter(item => 
       item.type === "dir" ||
-      filteredExtensions.includes(item.extension?.toLowerCase())
+      filteredExtensionsSet.has(item.extension?.toLowerCase())
     );
-  }, [data, filteredExtensions]);
+  }, [data, filteredExtensionsSet]);
 
-  const [isLoading, setIsLoading] = useState(true);
+  const sortMediaItems = useCallback((items: MediaItem[]) => {
+    return [...items].sort((a, b) => {
+      if (a.type === b.type) return a.name.localeCompare(b.name);
+      return a.type === "dir" ? -1 : 1;
+    });
+  }, []);
   
+  const buildMediaApiUrl = useCallback((targetPath: string): string => (
+    `/api/${config.owner}/${config.repo}/${encodeURIComponent(config.branch)}/media/${encodeURIComponent(mediaConfig.name)}/${encodeURIComponent(targetPath)}`
+  ), [config.branch, config.owner, config.repo, mediaConfig.name]);
+
+  const mediaKey = useMemo(() => buildMediaApiUrl(path), [buildMediaApiUrl, path]);
+  const fetchMediaByUrl = useCallback(async (apiUrl: string): Promise<MediaItem[]> => {
+    const response = await fetch(apiUrl);
+    const payload = await requireApiSuccess<any>(
+      response,
+      "Failed to fetch media",
+    );
+    return payload.data as MediaItem[];
+  }, []);
+
+  const {
+    data: swrMediaData,
+    error: swrMediaError,
+    isLoading: swrMediaLoading,
+  } = useSWR<MediaItem[]>(
+    mediaKey,
+    fetchMediaByUrl,
+    {
+      revalidateOnFocus: true,
+      revalidateOnReconnect: true,
+      dedupingInterval: 2000,
+    },
+  );
+
   useEffect(() => {
-    async function fetchMedia() {
-      if (config) {
-        setIsLoading(true);
-        setError(null);
+    if (!swrMediaData) return;
+    setData(swrMediaData);
+    setError(null);
+  }, [swrMediaData]);
 
-        try {
-          const response = await fetch(`/api/${config.owner}/${config.repo}/${encodeURIComponent(config.branch)}/media/${encodeURIComponent(mediaConfig.name)}/${encodeURIComponent(path)}`);
-          if (!response.ok) throw new Error(`Failed to fetch media: ${response.status} ${response.statusText}`);
+  useEffect(() => {
+    if (!swrMediaError) return;
+    const message = swrMediaError instanceof Error ? swrMediaError.message : "Failed to fetch media.";
+    setError(message);
+  }, [swrMediaError]);
 
-          const data: any = await response.json();
-          
-          if (data.status !== "success") throw new Error(data.message);
-          
-          setData(data.data);
-        } catch (error: any) {
-          console.error(error);
-          setError(error.message);
-        } finally {
-          setIsLoading(false);
+  const isLoading = swrMediaLoading && !data;
+
+  const handleUpload = useCallback((entry: FileSaveData) => {
+    if (!entry.path || !entry.name) return;
+    const mediaEntry: MediaItem = {
+      type: "file",
+      sha: entry.sha,
+      name: entry.name,
+      path: entry.path,
+      extension: entry.extension,
+      size: entry.size,
+      url: entry.url,
+    };
+
+    setData((prevData) => {
+      if (!prevData) return [mediaEntry];
+
+        const existingIndex = prevData.findIndex((item) => item.path === mediaEntry.path);
+        if (existingIndex >= 0) {
+          const next = [...prevData];
+          next[existingIndex] = { ...next[existingIndex], ...mediaEntry };
+          return sortMediaItems(next);
         }
-      }
-    }
-    fetchMedia();
-    
-  }, [config, path, mediaConfig.name]);
 
-  const handleUpload = useCallback((entry: any) => {
-    setData((prevData) => {
-      if (!prevData) return [entry];
-      return sortFiles([...prevData, entry]);
+        return sortMediaItems([...prevData, mediaEntry]);
     });
-    if (onUpload) onUpload(entry);
-  }, [onUpload]);
+    void mutate((key) => typeof key === "string" && key.includes(`/media/${encodeURIComponent(mediaConfig.name)}/`));
+    onUpload?.(entry);
+  }, [mediaConfig.name, mutate, onUpload, sortMediaItems]);
 
-  const handleDelete = useCallback((path: string) => {
-    setData((prevData) => prevData?.filter((item) => item.path !== path));
-  }, []);
-
-  const handleRename = useCallback((path: string, newPath: string) => {
+  const handleDelete = useCallback((deletedPath: string) => {
     setData((prevData) => {
-      if (!prevData) return;
-      if (getParentPath(normalizePath(path)) === getParentPath(normalizePath(newPath))) {
-        const newData = prevData?.map((item) => {
-          return item.path === path ? { ...item, path: newPath, name: getFileName(newPath) } : item;
+      if (!prevData) return prevData;
+      const next = prevData.filter((item) => item.path !== deletedPath);
+      return next.length === prevData.length ? prevData : next;
+    });
+    void mutate((key) => typeof key === "string" && key.includes(`/media/${encodeURIComponent(mediaConfig.name)}/`));
+  }, [mediaConfig.name, mutate]);
+
+  const handleRename = useCallback((oldPath: string, newPath: string) => {
+    setData((prevData) => {
+      if (!prevData || oldPath === newPath) return prevData;
+
+      if (getParentPath(normalizePath(oldPath)) === getParentPath(normalizePath(newPath))) {
+        let changed = false;
+        const next = prevData.map((item) => {
+          if (item.path !== oldPath) return item;
+          changed = true;
+          return { ...item, path: newPath, name: getFileName(newPath) };
         });
-        return sortFiles(newData);
+        return changed ? sortMediaItems(next) : prevData;
       }
-      return prevData?.filter((item) => item.path !== path);
-    });
-  }, []);
 
-  const handleFolderCreate = useCallback((entry: any) => {
-    const parentPath = getParentPath(entry.path);
-    const parent = {
+      const next = prevData.filter((item) => item.path !== oldPath);
+      return next.length === prevData.length ? prevData : next;
+    });
+    void mutate((key) => typeof key === "string" && key.includes(`/media/${encodeURIComponent(mediaConfig.name)}/`));
+  }, [mediaConfig.name, mutate, sortMediaItems]);
+
+  const handleFolderCreate = useCallback((entry: unknown) => {
+    const createdPath = typeof entry === "string"
+      ? entry
+      : entry && typeof entry === "object" && "path" in entry
+        ? (entry as { path?: string }).path
+        : undefined;
+
+    if (!createdPath) return;
+
+    const parentPath = getParentPath(createdPath);
+    if (!parentPath) return;
+
+    const parent: MediaItem = {
       type: "dir",
       name: getFileName(parentPath),
       path: parentPath,
       size: 0,
       url: null,
-    }
+    };
     
     setData((prevData) => {
       if (!prevData) return [parent];
-      return sortFiles([...prevData, parent]);
+      if (prevData.some((item) => item.path === parent.path && item.type === "dir")) {
+        return prevData;
+      }
+      return sortMediaItems([...prevData, parent]);
     });
-  }, []);
+    void mutate((key) => typeof key === "string" && key.includes(`/media/${encodeURIComponent(mediaConfig.name)}/`));
+  }, [mediaConfig.name, mutate, sortMediaItems]);
 
-  const handleNavigate = (newPath: string) => {
+  const handleNavigate = useCallback((newPath: string) => {
     setPath(newPath);
     if (!onSelect) {
-      const params = new URLSearchParams(Array.from(searchParams.entries()));
+      const params = new URLSearchParams(window.location.search);
       params.set("path", newPath || mediaConfig.input);
       router.push(`${pathname}?${params.toString()}`);
     }
-  }
+  }, [mediaConfig.input, onSelect, pathname, router]);
 
   const handleNavigateParent = () => {
     if (!path || path === mediaConfig.input) return;
@@ -186,20 +420,20 @@ const MediaView = ({
   }
 
   const handleSelect = useCallback((path: string) => {
-    setSelected((prevSelected) => {
-      let newSelected = prevSelected;
+    startTransition(() => {
+      setSelected((prevSelected) => {
+        const isSelected = prevSelected.includes(path);
+        if (isSelected) {
+          return prevSelected.filter((item) => item !== path);
+        }
 
-      if (maxSelected != null && prevSelected.length >= maxSelected) {
-        newSelected = maxSelected > 1
-          ? newSelected.slice(1 - maxSelected)
-          : [];
-      }
+        const nextSelected = [...prevSelected, path];
+        if (maxSelected == null) return nextSelected;
+        if (maxSelected <= 0) return [];
+        if (nextSelected.length <= maxSelected) return nextSelected;
 
-      newSelected = newSelected.includes(path)
-        ? newSelected.filter(item => item !== path)
-        : [...newSelected, path];
-      
-      return newSelected;
+        return nextSelected.slice(nextSelected.length - maxSelected);
+      });
     });
   }, [maxSelected]);
 
@@ -227,8 +461,8 @@ const MediaView = ({
               <Skeleton className="w-24 h-5 rounded mb-2"/>
               <Skeleton className="w-16 h-2 rounded"/>
             </div>
-            <Button variant="ghost" size="icon" className="shrink-0 ml-auto" disabled>
-              <EllipsisVertical className="h-4 w-4" />
+            <Button variant="ghost" size="icon-xs" className="shrink-0 ml-auto" disabled>
+              <EllipsisVertical />
             </Button>
           </div>
         </li>
@@ -236,139 +470,244 @@ const MediaView = ({
     </ul>
   ), []);
 
+  const breadcrumbNode = useMemo(() => {
+    const breadcrumbTextClass = usePageHeader ? "font-semibold text-lg flex-nowrap" : "text-sm flex-nowrap";
+    const isDialog = !usePageHeader;
+    const mediaTitle = mediaConfig.label || mediaConfig.name || "Media";
+    const rootPath = normalizePath(mediaConfig.input);
+    const currentPath = normalizePath(path || mediaConfig.input);
+    const relativePath = getRelativePath(currentPath, rootPath);
+    const segments = relativePath ? relativePath.split("/").filter(Boolean) : [];
+
+    if (isDialog && segments.length === 0) return null;
+
+    const entries = segments.map((segment, index) => ({
+      name: segment,
+      path: joinPathSegments([rootPath, segments.slice(0, index + 1).join("/")]),
+    }));
+
+    const middleEntries = entries.length > 3 ? entries.slice(1, -1) : [];
+    const visibleEntries = entries.length > 3
+      ? [entries[0], entries[entries.length - 1]]
+      : entries;
+
+    return (
+      <Breadcrumb>
+        <BreadcrumbList className={breadcrumbTextClass}>
+          <BreadcrumbItem className={entries.length === 0 ? "min-w-0 max-w-full truncate" : undefined}>
+            {entries.length > 0 ? (
+              <BreadcrumbLink className="cursor-pointer" onClick={() => handleNavigate(rootPath)}>
+                {isDialog ? (
+                  <>
+                    <House className="size-3.5" />
+                    <span className="sr-only">{mediaTitle}</span>
+                  </>
+                ) : (
+                  mediaTitle
+                )}
+              </BreadcrumbLink>
+            ) : (
+              <BreadcrumbPage className={usePageHeader ? "block max-w-full font-semibold truncate" : "block max-w-full truncate"}>{mediaTitle}</BreadcrumbPage>
+            )}
+          </BreadcrumbItem>
+          {entries.length > 0 && <BreadcrumbSeparator />}
+
+          {entries.length > 3 && (
+            <>
+              <BreadcrumbItem>
+                <DropdownMenu>
+                  <DropdownMenuTrigger className="flex items-center">
+                    <BreadcrumbEllipsis className="h-4 w-4" />
+                    <span className="sr-only">Show hidden segments</span>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start">
+                    {middleEntries.map((entry) => (
+                      <DropdownMenuItem
+                        key={entry.path}
+                        className="cursor-pointer"
+                        onClick={() => handleNavigate(entry.path)}
+                      >
+                        {entry.name}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </BreadcrumbItem>
+              <BreadcrumbSeparator />
+            </>
+          )}
+
+          {visibleEntries.map((entry, index) => {
+            const isLast = index === visibleEntries.length - 1;
+            return (
+              <Fragment key={entry.path}>
+                <BreadcrumbItem className={isLast ? "min-w-0 max-w-full truncate" : undefined}>
+                  {isLast ? (
+                    <BreadcrumbPage className={usePageHeader ? "block max-w-full font-semibold truncate" : "block max-w-full truncate"}>{entry.name}</BreadcrumbPage>
+                  ) : (
+                    <BreadcrumbLink className="cursor-pointer" onClick={() => handleNavigate(entry.path)}>
+                      {entry.name}
+                    </BreadcrumbLink>
+                  )}
+                </BreadcrumbItem>
+                {!isLast && <BreadcrumbSeparator />}
+              </Fragment>
+            );
+          })}
+        </BreadcrumbList>
+      </Breadcrumb>
+    );
+  }, [handleNavigate, mediaConfig.input, mediaConfig.label, mediaConfig.name, path, usePageHeader]);
+
+  const headerNode = useMemo(() => (
+    <div className="flex items-center justify-between gap-x-2">
+      <div className="min-w-0 truncate overflow-hidden">{breadcrumbNode}</div>
+      <MediaUpload media={mediaConfig.name} path={path} onUpload={handleUpload} extensions={filteredExtensions}>
+        <MediaHeaderActions
+          mediaName={mediaConfig.name}
+          path={path}
+          onFolderCreate={handleFolderCreate}
+        />
+      </MediaUpload>
+    </div>
+  ), [breadcrumbNode, filteredExtensions, handleFolderCreate, handleUpload, mediaConfig.name, path]);
+
+  useOptionalRepoHeader(
+    { header: headerNode },
+    { enabled: usePageHeader },
+  );
+
+  const selectedPaths = useMemo(() => new Set(selected), [selected]);
+
+  const gridItems = useMemo(() => {
+    if (!filteredData) return [];
+
+    return filteredData.map((item) => ({
+      item,
+      isImage: item.type === "file" && imageExtensionsSet.has((item.extension || "").toLowerCase()),
+      displaySize: item.type === "file" && typeof item.size === "number" ? getFileSize(item.size) : "",
+    }));
+  }, [filteredData, imageExtensionsSet]);
+
   if (!mediaConfig.input) {
     return (
-      <Message
-        title="No media defined"
-        description="You have no media defined in your settings."
-        className="absolute inset-0"
-        cta="Go to settings"
-        href={`/${config.owner}/${config.repo}/${encodeURIComponent(config.branch)}/settings`}
-      />
+      <Empty className="absolute inset-0 border-0 rounded-none">
+        <EmptyHeader>
+          <EmptyTitle>Media not configured</EmptyTitle>
+          <EmptyDescription>No media folder is configured for this repository.</EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Link
+            className={buttonVariants({ variant: "default", size: "sm" })}
+            href={`/${config.owner}/${config.repo}/${encodeURIComponent(config.branch)}/configuration`}
+          >
+            Open configuration
+          </Link>
+        </EmptyContent>
+      </Empty>
     );
   }
 
   if (error) {
     // TODO: should we use a custom error class with code?
-    if (path === mediaConfig.input && error === "Not found") {
+    if (error === "Not found") {
+      const isRootFolder = path === mediaConfig.input;
       return (
-        <Message
-            title="Media folder missing"
-            description={`The media folder "${mediaConfig.input}" has not been created yet.`}
-            className="absolute inset-0"
-          >
-          <EmptyCreate type="media" name={mediaConfig.name}>Create folder</EmptyCreate>
-        </Message>
+        <Empty className="absolute inset-0 border-0 rounded-none">
+          <EmptyHeader>
+            <EmptyTitle>Media folder not found</EmptyTitle>
+            <EmptyDescription>
+              {isRootFolder
+                ? `The media folder "${mediaConfig.input}" does not exist yet.`
+                : `The folder "${path}" could not be found.`}
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
       );
     } else {
       return (
-        <Message
-          title="Something's wrong..."
-          description={error}
-          className="absolute inset-0"
-        >
-          <Button size="sm" onClick={() => handleNavigate(mediaConfig.input)}>Go to media root</Button>
-        </Message>
+        <Empty className="absolute inset-0 border-0 rounded-none">
+          <EmptyHeader>
+            <EmptyTitle>Something went wrong</EmptyTitle>
+            <EmptyDescription>{error}</EmptyDescription>
+          </EmptyHeader>
+          <EmptyContent>
+            <Button size="sm" onClick={() => handleNavigate(mediaConfig.input)}>Open media root</Button>
+          </EmptyContent>
+        </Empty>
       );
     }
   }
 
+  const mediaGrid = (
+    <MediaUpload.DropZone className="flex-1 overflow-auto scrollbar">
+      <div className="h-full relative flex flex-col" ref={filesGridRef}>
+        {isLoading
+          ? loadingSkeleton
+          : gridItems.length > 0
+            ? <ul className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-8 p-1">
+                {gridItems.map(({ item, isImage, displaySize }) => 
+                  <li key={item.path}>
+                    {item.type === "dir"
+                      ? <MediaFolderTile item={item} onNavigate={handleNavigate} />
+                      : <MediaFileTile
+                          item={item}
+                          mediaName={mediaConfig.name}
+                          selectable={!!onSelect}
+                          isSelected={selectedPaths.has(item.path)}
+                          isImage={isImage}
+                          displaySize={displaySize}
+                          portalContainer={filesGridRef.current}
+                          onSelect={handleSelect}
+                          onDelete={handleDelete}
+                          onRename={handleRename}
+                        />
+                    }
+                    
+                  </li>
+                )}
+              </ul>
+            : <Empty className="border-0 shadow-none">
+                <EmptyHeader>
+                  <EmptyTitle>Empty folder</EmptyTitle>
+                  <EmptyDescription>Drag and drop files here, or use Upload to add files to this folder.</EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+        }
+      </div>
+    </MediaUpload.DropZone>
+  );
+
+  if (!usePageHeader) {
+    return (
+      <MediaUpload media={mediaConfig.name} path={path} onUpload={handleUpload} extensions={filteredExtensions}>
+        <div className="flex-1 flex flex-col space-y-4">
+          <header className="flex items-center gap-x-2 justify-between">
+            <div className="sm:flex-1">
+              <div className="hidden sm:block min-w-0 truncate overflow-hidden">{breadcrumbNode}</div>
+              <Button onClick={handleNavigateParent} size="icon-sm" variant="outline" className="shrink-0 sm:hidden" disabled={!path || path === mediaConfig.input}>
+                <CornerLeftUp className="w-4 h-4"/>
+              </Button>
+            </div>
+            <MediaHeaderActions
+              mediaName={mediaConfig.name}
+              path={path}
+              onFolderCreate={handleFolderCreate}
+            />
+          </header>
+          {mediaGrid}
+        </div>
+      </MediaUpload>
+    );
+  }
+
   return (
     <div className="flex-1 flex flex-col space-y-4">
-      <header className="flex items-center gap-x-2">
-        <div className="sm:flex-1">
-          <PathBreadcrumb path={path} rootPath={mediaConfig.input} handleNavigate={handleNavigate} className="hidden sm:block"/>
-          <Button onClick={handleNavigateParent} size="icon-sm" variant="outline" className="shrink-0 sm:hidden" disabled={!path || path === mediaConfig.input}>
-            <CornerLeftUp className="w-4 h-4"/>
-          </Button>
-        </div>
-        <FolderCreate path={path} name={mediaConfig.name} type="media" onCreate={handleFolderCreate}>
-          <Button type="button" variant="outline" className="ml-auto" size="icon-sm">
-            <FolderPlus className="h-3.5 w-3.5"/>
-          </Button>
-        </FolderCreate>
-        <MediaUpload media={mediaConfig.name} path={path} onUpload={handleUpload} extensions={filteredExtensions}>
-          <MediaUpload.Trigger>
-            <Button type="button" size="sm" className="gap-2">
-              <Upload className="h-3.5 w-3.5"/>
-              Upload
-            </Button>
-          </MediaUpload.Trigger>
-        </MediaUpload>
-      </header>
       <MediaUpload media={mediaConfig.name} path={path} onUpload={handleUpload} extensions={filteredExtensions}>
-        <MediaUpload.DropZone className="flex-1 overflow-auto scrollbar">
-          <div className="h-full relative flex flex-col" ref={filesGridRef}>
-            {isLoading
-              ? loadingSkeleton
-              : filteredData && filteredData.length > 0
-                ? <ul className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-8 p-1">
-                    {filteredData.map((item, index) => 
-                      <li key={item.path}>
-                        {item.type === "dir"
-                          ? <button
-                              className="hover:bg-muted focus:ring-offset-background focus:ring-2 focus:ring-ring focus:ring-offset-2 outline-none rounded-md block w-full"
-                              onClick={() => handleNavigate(item.path)}
-                            >
-                              <div className="flex items-center justify-center aspect-video">
-                                <Folder className="stroke-[0.5] h-[5.5rem] w-[5.5rem]"/>
-                              </div>
-                              <div className="flex items-center justify-center p-2">
-                                <div className="overflow-hidden h-9">
-                                  <div className="text-sm font-medium truncate">{item.name}</div>
-                                </div>
-                              </div>
-                            </button>
-                          : <label htmlFor={`item-${index}`}>
-                              {onSelect &&
-                                <input 
-                                  type="checkbox" 
-                                  id={`item-${index}`} 
-                                  className="peer sr-only"
-                                  checked={selected.includes(item.path)}
-                                  onChange={() => handleSelect(item.path)}
-                                />
-                              }
-                              <div className={onSelect && "hover:bg-muted peer-focus:ring-offset-background peer-focus:ring-2 peer-focus:ring-ring peer-focus:ring-offset-2 rounded-md peer-checked:ring-offset-background peer-checked:ring-offset-2 peer-checked:ring-2 peer-checked:ring-ring relative"}>
-                                {extensionCategories.image.includes(item.extension)
-                                  ? <Thumbnail name={mediaConfig.name} path={item.path} className="rounded-t-md aspect-video"/>
-                                  : <div className="flex items-center justify-center rounded-md aspect-video">
-                                      <File className="stroke-[0.5] h-24 w-24"/>
-                                    </div>
-                                }
-                                <div className="flex gap-x-2 items-center p-2">
-                                  <div className="overflow-hidden mr-auto h-9">
-                                    <div className="text-sm font-medium truncate">{item.name}</div>
-                                    <div className="text-xs text-muted-foreground truncate">{getFileSize(item.size)}</div>
-                                  </div>
-                                  <FileOptions path={item.path} sha={item.sha} type="media" name={mediaConfig.name} onDelete={handleDelete} onRename={handleRename} portalProps={{container: filesGridRef.current}}>
-                                    <Button variant="ghost" size="icon" className="shrink-0">
-                                      <EllipsisVertical className="h-4 w-4" />
-                                    </Button>
-                                  </FileOptions>
-                                </div>
-                                {onSelect && selected.includes(item.path) &&
-                                  <div className="text-primary-foreground bg-primary p-0.5 rounded-full absolute top-2 left-2">
-                                    <Check className="stroke-[3] w-3 h-3"/>
-                                  </div>
-                                }
-                              </div>
-                            </label>
-                        }
-                        
-                      </li>
-                    )}
-                  </ul>
-                : <p className="text-muted-foreground flex items-center justify-center text-sm p-6">
-                    <Ban className="h-4 w-4 mr-2"/>
-                    This folder is empty.
-                  </p>
-            }
-          </div>
-        </MediaUpload.DropZone>
+        {mediaGrid}
       </MediaUpload>
     </div>
-  )
+  );
 };
 
 export { MediaView };

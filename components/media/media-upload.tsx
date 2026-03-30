@@ -1,16 +1,19 @@
 "use client";
 
-import { useRef, isValidElement, cloneElement, useMemo, useCallback, createContext, useContext, useState } from "react";
+import { useRef, cloneElement, useMemo, useCallback, createContext, useContext, useState } from "react";
 import { useConfig } from "@/contexts/config-context";
-import { joinPathSegments } from "@/lib/utils/file";
+import { getFileExtension, generateRandomUploadName, joinPathSegments } from "@/lib/utils/file";
 import { toast } from "sonner";
 import { getSchemaByName } from "@/lib/schema";
 import { cn } from "@/lib/utils";
+import { requireApiSuccess } from "@/lib/api-client";
+import type { FileSaveData } from "@/types/api";
 
 interface MediaUploadContextValue {
-  handleFiles: (files: FileList) => Promise<void>;
+  handleFiles: (files: File[]) => Promise<void>;
   accept?: string;
   multiple?: boolean;
+  disabled?: boolean;
 }
 
 const MediaUploadContext = createContext<MediaUploadContextValue | null>(null);
@@ -18,10 +21,12 @@ const MediaUploadContext = createContext<MediaUploadContextValue | null>(null);
 interface MediaUploadProps {
   children: React.ReactNode;
   path?: string;
-  onUpload?: (path: string) => void;
+  onUpload?: (entry: FileSaveData) => void;
   media?: string;
   extensions?: string[];
   multiple?: boolean;
+  rename?: boolean;
+  disabled?: boolean;
 }
 
 interface MediaUploadTriggerProps {
@@ -33,7 +38,7 @@ interface MediaUploadDropZoneProps {
   className?: string;
 }
 
-function MediaUploadRoot({ children, path, onUpload, media, extensions, multiple }: MediaUploadProps) {
+function MediaUploadRoot({ children, path, onUpload, media, extensions, multiple, rename, disabled = false }: MediaUploadProps) {
   const { config } = useConfig();
   if (!config) throw new Error(`Configuration not found.`);
 
@@ -58,62 +63,65 @@ function MediaUploadRoot({ children, path, onUpload, media, extensions, multiple
       : undefined;
   }, [extensions, configMedia?.extensions]);
 
-  const handleFiles = useCallback(async (files: FileList) => {
+  const handleFiles = useCallback(async (files: File[]) => {
     try {
-      for (let i = 0; i < files.length; i++) {
-        const reader = new FileReader();
-        const file = files[i];
+      for (const file of files) {
+        const effectiveRename = rename ?? Boolean(configMedia?.rename);
+        const extension = getFileExtension(file.name);
+        const uploadFilename = effectiveRename
+          ? generateRandomUploadName(extension)
+          : file.name;
 
-        const uploadPromise = new Promise((resolve, reject) => {
-          reader.onload = async () => {
-            try {
-              const content = (reader.result as string).replace(/^(.+,)/, "");
-              const fullPath = joinPathSegments([path ?? "", file.name]);
+        const uploadPromise = (async () => {
+          const content = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const base64Content = (reader.result as string).replace(/^(.+,)/, "");
+              resolve(base64Content);
+            };
+            reader.onerror = () => reject(new Error("Failed to read file"));
+            reader.readAsDataURL(file);
+          });
 
-              const response = await fetch(`/api/${config.owner}/${config.repo}/${encodeURIComponent(config.branch)}/files/${encodeURIComponent(fullPath)}`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  type: "media",
-                  name: configMedia.name,
-                  content,
-                }),
-              });
+          const fullPath = joinPathSegments([path ?? "", uploadFilename]);
+          const response = await fetch(`/api/${config.owner}/${config.repo}/${encodeURIComponent(config.branch)}/files/${encodeURIComponent(fullPath)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              type: "media",
+              name: configMedia.name,
+              content,
+            }),
+          });
 
-              if (!response.ok) throw new Error(`Failed to upload file: ${response.status} ${response.statusText}`);
+          const data = await requireApiSuccess<any>(
+            response,
+            "Failed to upload file",
+          );
 
-              const data = await response.json();
-              if (data.status !== "success") throw new Error(data.message);
-              
-              resolve(data);
-            } catch (error) {
-              reject(error);
-            }
-          };
-          reader.onerror = () => reject(new Error("Failed to read file"));
-        });
+          return data.data as FileSaveData;
+        })();
 
-        reader.readAsDataURL(file);
-
-        toast.promise(uploadPromise, {
+        await toast.promise(uploadPromise, {
           loading: `Uploading ${file.name}`,
-          success: (data: any) => {
-            onUpload?.(data.data);
-            return data.message;
+          success: (savedEntry) => {
+            onUpload?.(savedEntry);
+            return `Uploaded ${file.name}`;
           },
-          error: (error: any) => error.message,
+          error: (error: unknown) => error instanceof Error ? error.message : "Upload failed",
         });
       }
     } catch (error) {
       console.error(error);
     }
-  }, [config, path, configMedia?.name, onUpload]);
+  }, [config, path, configMedia?.name, configMedia?.rename, onUpload, rename]);
 
   const contextValue = useMemo(() => ({
     handleFiles,
     accept,
-    multiple
-  }), [handleFiles, accept, multiple]);
+    multiple,
+    disabled,
+  }), [handleFiles, accept, multiple, disabled]);
 
   return (
     <MediaUploadContext.Provider value={contextValue}>
@@ -128,35 +136,42 @@ function MediaUploadTrigger({ children }: MediaUploadTriggerProps) {
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const filterAcceptedFiles = useCallback((files: File[]) => {
+    const acceptedExtensions = context.accept?.split(",").map((ext) => ext.trim().toLowerCase());
+    if (!acceptedExtensions?.length) return files;
+
+    const validFiles = files.filter((file) => {
+      const ext = `.${file.name.split(".").pop()?.toLowerCase()}`;
+      return acceptedExtensions.includes(ext);
+    });
+
+    if (validFiles.length === 0) {
+      toast.error(`Invalid file type. Allowed: ${context.accept}`);
+      return [];
+    }
+
+    if (validFiles.length !== files.length) {
+      toast.error(`Some files were skipped. Allowed: ${context.accept}`);
+    }
+
+    return validFiles;
+  }, [context.accept]);
+
   const handleClick = useCallback(() => {
+    if (context.disabled) return;
     fileInputRef.current?.click();
-  }, []);
+  }, [context.disabled]);
 
   const handleFileInput = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    if (context.disabled) return;
     const files = event.target.files;
     if (!files || files.length === 0) return;
 
-    const acceptedExtensions = context.accept?.split(',').map(ext => ext.trim().toLowerCase());
-    if (acceptedExtensions?.length) {
-      const validFiles = Array.from(files).filter(file => {
-        const ext = `.${file.name.split('.').pop()?.toLowerCase()}`;
-        return acceptedExtensions.includes(ext);
-      });
+    const validFiles = filterAcceptedFiles(Array.from(files));
+    if (validFiles.length === 0) return;
 
-      if (validFiles.length === 0) {
-        toast.error(`Invalid file type. Allowed: ${context.accept}`);
-        return;
-      }
-
-      if (validFiles.length !== files.length) {
-        toast.error(`Some files were skipped. Allowed: ${context.accept}`);
-      }
-
-      context.handleFiles(validFiles as unknown as FileList);
-    } else {
-      context.handleFiles(files);
-    }
-  }, [context]);
+    context.handleFiles(validFiles);
+  }, [context, filterAcceptedFiles]);
 
   return (
     <>
@@ -179,44 +194,52 @@ function MediaUploadDropZone({ children, className }: MediaUploadDropZoneProps) 
   
   const [isDragging, setIsDragging] = useState(false);
 
+  const filterAcceptedFiles = useCallback((files: File[]) => {
+    const acceptedExtensions = context.accept?.split(",").map((ext) => ext.trim().toLowerCase());
+    if (!acceptedExtensions?.length) return files;
+
+    const validFiles = files.filter((file) => {
+      const ext = `.${file.name.split(".").pop()?.toLowerCase()}`;
+      return acceptedExtensions.includes(ext);
+    });
+
+    if (validFiles.length === 0) {
+      toast.error(`Invalid file type. Allowed: ${context.accept}`);
+      return [];
+    }
+
+    if (validFiles.length !== files.length) {
+      toast.error(`Some files were skipped. Allowed: ${context.accept}`);
+    }
+
+    return validFiles;
+  }, [context.accept]);
+
   const handleDragOver = useCallback((e: React.DragEvent) => {
+    if (context.disabled) return;
     e.preventDefault();
     setIsDragging(true);
-  }, []);
+  }, [context.disabled]);
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
+    if (context.disabled) return;
     e.preventDefault();
     setIsDragging(false);
-  }, []);
+  }, [context.disabled]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
+    if (context.disabled) return;
     e.preventDefault();
     setIsDragging(false);
     
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
 
-    const acceptedExtensions = context.accept?.split(',').map(ext => ext.trim().toLowerCase());
-    if (acceptedExtensions?.length) {
-      const validFiles = Array.from(files).filter(file => {
-        const ext = `.${file.name.split('.').pop()?.toLowerCase()}`;
-        return acceptedExtensions.includes(ext);
-      });
+    const validFiles = filterAcceptedFiles(Array.from(files));
+    if (validFiles.length === 0) return;
 
-      if (validFiles.length === 0) {
-        toast.error(`Invalid file type. Allowed: ${context.accept}`);
-        return;
-      }
-
-      if (validFiles.length !== files.length) {
-        toast.error(`Some files were skipped. Allowed: ${context.accept}`);
-      }
-
-      context.handleFiles(validFiles as unknown as FileList);
-    } else {
-      context.handleFiles(files);
-    }
-  }, [context]);
+    context.handleFiles(validFiles);
+  }, [context, filterAcceptedFiles]);
 
   return (
     <div
@@ -226,7 +249,7 @@ function MediaUploadDropZone({ children, className }: MediaUploadDropZoneProps) 
       className={cn("relative", className)}
     >
       {children}
-      {isDragging && (
+      {!context.disabled && isDragging && (
         <div className="absolute inset-0 bg-primary/10 rounded-lg flex items-center justify-center">
           <p className="text-sm text-foreground font-medium bg-background rounded-full px-3 py-1">
             Drop files here to upload

@@ -1,26 +1,31 @@
 import { redirect } from "next/navigation";
-import { createOctokitInstance } from "@/lib/utils/octokit";
-import { getAuth } from "@/lib/auth";
-import { getToken } from "@/lib/token";
-import { configVersion, parseConfig, normalizeConfig } from "@/lib/config";
-import { getConfig, saveConfig, updateConfig } from "@/lib/utils/config";
+import { headers } from "next/headers";
+import { getConfig } from "@/lib/utils/config";
 import { ConfigProvider } from "@/contexts/config-context";
 import { RepoLayout } from "@/components/repo/repo-layout";
-import { EmptyCreate } from "@/components/empty-create";
-import { Message } from "@/components/message";
+import { getServerSession } from "@/lib/session-server";
+import { getToken } from "@/lib/token";
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import Link from "next/link";
+import { buttonVariants } from "@/components/ui/button";
 
 export default async function Layout({
   children,
-  params: { owner, repo, branch },
+  params,
 }: {
   children: React.ReactNode;
-  params: { owner: string; repo: string; branch: string; };
+  params: Promise<{ owner: string; repo: string; branch: string; }>;
 }) {
-  const { session, user } = await getAuth();
-  if (!session) return redirect("/sign-in");
-
-  const token = await getToken(user, owner, repo);
-  if (!token) throw new Error("Token not found");
+  const { owner, repo, branch } = await params;
+  const requestHeaders = await headers();
+  const session = await getServerSession();
+  const user = session?.user;
+  const returnTo = requestHeaders.get("x-return-to");
+  const signInUrl =
+    returnTo && returnTo !== "/sign-in"
+      ? `/sign-in?redirect=${encodeURIComponent(returnTo)}`
+      : "/sign-in";
+  if (!user) return redirect(signInUrl);
 
   const decodedBranch = decodeURIComponent(branch);
 
@@ -35,72 +40,56 @@ export default async function Layout({
 
   let errorMessage = null;
 
-  // We try to retrieve the config file (.pages.yml)
   try {
-    const octokit = createOctokitInstance(token);
-    const response = await octokit.rest.repos.getContent({
-      owner: owner,
-      repo: repo,
-      path: ".pages.yml",
-      ref: decodedBranch,
-      headers: { Accept: "application/vnd.github.v3+json" },
-    });
+    const { token } = await getToken(user, owner, repo);
+    const syncedConfig = await getConfig(
+      owner,
+      repo,
+      decodedBranch,
+      {
+        getToken: async () => token,
+      },
+    );
 
-    if (Array.isArray(response.data)) {
-      throw new Error("Expected a file but found a directory");
-    } else if (response.data.type !== "file") {
-      throw new Error("Invalid response type");
-    }
-
-    const savedConfig = await getConfig(owner, repo, decodedBranch);
-
-    // TODO: make it resilient to config not found (e.g. DB down)
-
-    if (savedConfig && savedConfig.sha === response.data.sha && savedConfig.version === configVersion) {
-      // Config in DB and up-to-date
-      config = savedConfig;
-    } else {
-      const configFile = Buffer.from(response.data.content, "base64").toString();
-      const parsedConfig = parseConfig(configFile);
-      const configObject = normalizeConfig(parsedConfig.document.toJSON());
-
-      config.sha = response.data.sha;
-      config.version = configVersion ?? "0.0";
-      config.object = configObject;
-
-      if (!savedConfig) {
-        // Config not in DB
-        await saveConfig(config);
-      } else {
-        // Config in DB but outdated (based on sha or version)
-        await updateConfig(config);
-      }
+    if (syncedConfig) {
+      config = syncedConfig;
     }
   } catch (error: any) {
     if (error.status === 404) {
-      if (error.response.data.message === "Not Found") {
-        errorMessage = (
-          <Message
-            title="No configuration file"
-            description={`You need to add a ".pages.yml" file to this branch.`}
-            className="absolute inset-0"
-          >
-            <EmptyCreate type="settings">Create a configuration file</EmptyCreate>
-          </Message>
-        );
+      if (error.response?.data?.message === "Not Found") {
+        // Let downstream pages (especially /configuration via Entry) handle missing .pages.yml.
       } else {
         // We assume the branch is not valid
         errorMessage = (
-          <Message
-            title="Invalid branch"
-            description={`The branch "${decodedBranch}" doesn't exist. It may have been removed or renamed.`}
-            className="absolute inset-0"
-            href={`/${owner}/${repo}`}
-            cta={"Switch to the default branch"}
-          />
+          <Empty className="absolute inset-0 border-0 rounded-none">
+            <EmptyHeader>
+              <EmptyTitle>Branch not found</EmptyTitle>
+              <EmptyDescription>{`The branch "${decodedBranch}" could not be found. It may have been removed or renamed.`}</EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Link className={buttonVariants({ variant: "default", size: "sm" })} href={`/${owner}/${repo}`}>
+                Open default branch
+              </Link>
+            </EmptyContent>
+          </Empty>
         );
       }
-      // TODO: catch all error (it's not always just one of these two)
+    } else if (error.status === 403) {
+      errorMessage = (
+        <Empty className="absolute inset-0 border-0 rounded-none">
+          <EmptyHeader>
+            <EmptyTitle>Access denied</EmptyTitle>
+            <EmptyDescription>You do not have permission to access this repository.</EmptyDescription>
+          </EmptyHeader>
+          <EmptyContent>
+            <Link className={buttonVariants({ variant: "default", size: "sm" })} href="/">
+              Choose another repository
+            </Link>
+          </EmptyContent>
+        </Empty>
+      );
+    } else {
+      throw error;
     }
   }
 

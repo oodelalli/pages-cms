@@ -1,12 +1,20 @@
 "use client";
 
-import { useState, useMemo, useEffect, useRef, forwardRef, useCallback } from "react";
-import Link from "next/link";
+import {
+  memo,
+  useState,
+  useMemo,
+  useEffect,
+  forwardRef,
+  useCallback,
+  useRef,
+  useId,
+} from "react";
 import {
   useForm,
   useFieldArray,
-  useFormState,
-  useFormContext
+  useFormContext,
+  useWatch,
 } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { editComponents } from "@/fields/registry";
@@ -14,11 +22,10 @@ import {
   initializeState,
   getDefaultValue,
   generateZodSchema,
-  sanitizeObject
+  sanitizeObject,
 } from "@/lib/schema";
 import { Field } from "@/types/field";
-import { EntryHistoryBlock, EntryHistoryDropdown } from "./entry-history";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
   Form,
@@ -30,12 +37,18 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import {
   Tooltip,
   TooltipContent,
@@ -44,6 +57,7 @@ import {
 import {
   DndContext,
   closestCenter,
+  type DragEndEvent,
   KeyboardSensor,
   PointerSensor,
   useSensor,
@@ -58,30 +72,101 @@ import {
 } from "@dnd-kit/sortable";
 import {
   restrictToVerticalAxis,
-  restrictToParentElement
+  restrictToParentElement,
 } from "@dnd-kit/modifiers";
 import { CSS } from "@dnd-kit/utilities";
 import {
-  ChevronLeft,
+  X,
   GripVertical,
-  Loader,
   Plus,
   Trash2,
-  Ellipsis,
+  ChevronsDownUp,
+  ChevronsUpDown,
   ChevronRight,
-  Dot,
 } from "lucide-react";
 import { toast } from "sonner";
 import { interpolate } from "@/lib/schema";
 
+type BeforeSubmitHook = () => void | Promise<void>;
+type RegisterBeforeSubmitHook = (
+  key: string,
+  hook: BeforeSubmitHook,
+) => () => void;
+
+type FieldWithReadonlyMeta = Field & {
+  __inheritedReadonly?: boolean;
+};
+
+type RenderFields = (
+  fields: FieldWithReadonlyMeta[],
+  parentName?: string,
+  registerBeforeSubmitHook?: RegisterBeforeSubmitHook,
+  inheritedReadonly?: boolean,
+) => React.ReactNode[];
+
+type NestedFieldProps = {
+  field: FieldWithReadonlyMeta;
+  fieldName: string;
+  renderFields: RenderFields;
+  registerBeforeSubmitHook?: RegisterBeforeSubmitHook;
+  isOpen?: boolean;
+  onToggleOpen?: () => void;
+  index?: number;
+};
+
+const hasFieldPathError = (errors: unknown, fieldName: string): boolean => {
+  let current: unknown = errors;
+  for (const part of fieldName.split(".")) {
+    if (typeof current !== "object" || current === null || !(part in current)) {
+      return false;
+    }
+    current = (current as Record<string, unknown>)[part];
+  }
+  return Boolean(current);
+};
+
+const getCollapsibleItemLabel = (
+  field: Field,
+  fieldValues: unknown,
+  index?: number,
+): string => {
+  if (
+    typeof field.list === "object" &&
+    field.list.collapsible &&
+    typeof field.list.collapsible === "object" &&
+    field.list.collapsible.summary
+  ) {
+    return interpolate(
+      field.list.collapsible.summary,
+      {
+        index: index !== undefined ? `${index + 1}` : "",
+        fields: fieldValues as Record<string, unknown>,
+      },
+      "fields",
+    );
+  }
+
+  return `Item ${index !== undefined ? `#${index + 1}` : ""}`;
+};
+
+const hasCollapsibleSummary = (field: Field) =>
+  typeof field.list === "object" &&
+  !!field.list.collapsible &&
+  typeof field.list.collapsible === "object" &&
+  !!field.list.collapsible.summary;
+
+const hasExplicitReadonly = (field: Field) =>
+  Boolean(field.readonly) &&
+  !(field as FieldWithReadonlyMeta).__inheritedReadonly;
+
 const SortableItem = ({
   id,
-  type,
-  children
+  children,
+  readonly = false,
 }: {
-  id: string,
-  type: string,
-  children: React.ReactNode
+  id: string;
+  children: React.ReactNode;
+  readonly?: boolean;
 }) => {
   const {
     attributes,
@@ -94,193 +179,368 @@ const SortableItem = ({
 
   const style = {
     transform: CSS.Translate.toString(transform),
-    transition
+    transition,
   };
-  
+
   return (
-    <div ref={setNodeRef} className={cn("flex gap-x-2 items-center", isDragging ? "opacity-50 z-50" : "z-10")} style={style}>
-      <Button type="button" variant="ghost" size="icon-sm" className="h-auto w-5 bg-muted/50 self-stretch rounded-md text-muted-foreground cursor-move" {...attributes} {...listeners}>
-        <GripVertical className="h-4 w-4" />
-      </Button>
+    <div
+      ref={setNodeRef}
+      className={cn(
+        "flex items-center gap-x-1",
+        isDragging ? "opacity-50 z-50" : "z-10",
+      )}
+      style={style}
+    >
+      {!readonly && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          className="h-auto w-6 self-stretch cursor-move text-muted-foreground hover:text-foreground"
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical />
+        </Button>
+      )}
       {children}
     </div>
   );
 };
 
+const ListItemRow = memo(function ListItemRow({
+  id,
+  field,
+  fieldName,
+  index,
+  isOpen,
+  defaultOpen,
+  isPendingRemove,
+  renderFields,
+  registerBeforeSubmitHook,
+  onToggleOpen,
+  onRequestRemove,
+  onRemoveConfirm,
+  onPendingRemoveChange,
+}: {
+  id: string;
+  field: FieldWithReadonlyMeta;
+  fieldName: string;
+  index: number;
+  isOpen?: boolean;
+  defaultOpen: boolean;
+  isPendingRemove: boolean;
+  renderFields: RenderFields;
+  registerBeforeSubmitHook?: RegisterBeforeSubmitHook;
+  onToggleOpen: (index: number) => void;
+  onRequestRemove: (index: number) => void;
+  onRemoveConfirm: (index: number) => void;
+  onPendingRemoveChange: (index: number, open: boolean) => void;
+}) {
+  const isReadonly = Boolean(field.readonly);
+  return (
+    <SortableItem id={id} readonly={isReadonly}>
+      <div className="grid gap-6 flex-1">
+        <SingleField
+          field={field}
+          fieldName={`${fieldName}.${index}`}
+          renderFields={renderFields}
+          registerBeforeSubmitHook={registerBeforeSubmitHook}
+          showLabel={false}
+          isOpen={isOpen ?? defaultOpen}
+          toggleOpen={() => onToggleOpen(index)}
+          index={index}
+        />
+      </div>
+      {!isReadonly && (
+        <Tooltip>
+          <AlertDialog
+            open={isPendingRemove}
+            onOpenChange={(open) => onPendingRemoveChange(index, open)}
+          >
+            <TooltipTrigger asChild>
+              <AlertDialogTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="text-muted-foreground hover:text-foreground self-start"
+                  onClick={() => onRequestRemove(index)}
+                >
+                  <Trash2 />
+                </Button>
+              </AlertDialogTrigger>
+            </TooltipTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Remove this item?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This action cannot be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={() => onRemoveConfirm(index)}>
+                  Remove
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+          <TooltipContent>Remove item</TooltipContent>
+        </Tooltip>
+      )}
+    </SortableItem>
+  );
+});
+
 const ListField = ({
   field,
   fieldName,
   renderFields,
+  registerBeforeSubmitHook,
 }: {
-  field: Field;
+  field: FieldWithReadonlyMeta;
   fieldName: string;
-  renderFields: Function;
+  renderFields: RenderFields;
+  registerBeforeSubmitHook?: RegisterBeforeSubmitHook;
 }) => {
-  const isCollapsible = !!(field.list && !(typeof field.list === 'object' && field.list?.collapsible === false));
-  
-  const { setValue, watch } = useFormContext();
-  const { fields: arrayFields, append, remove, move } = useFieldArray({
+  const supportsItemCollapse =
+    field.type === "object" || field.type === "block";
+  const isCollapsible = !!(
+    supportsItemCollapse &&
+    field.list &&
+    !(typeof field.list === "object" && field.list?.collapsible === false)
+  );
+  const defaultOpen = useMemo(() => {
+    const defaultCollapsed =
+      isCollapsible &&
+      typeof field.list === "object" &&
+      field.list.collapsible &&
+      typeof field.list.collapsible === "object" &&
+      field.list.collapsible.collapsed;
+    return !defaultCollapsed;
+  }, [field.list, isCollapsible]);
+
+  const {
+    fields: arrayFields,
+    append,
+    remove,
+    move,
+  } = useFieldArray({
     name: fieldName,
   });
-  const fieldValues = watch(fieldName);
-  
-  // Use an index-to-state map with a ref to survive re-renders
-  const openStatesRef = useRef<boolean[]>([]);
-  const [, forceUpdate] = useState({});
-  
-  useEffect(() => {
-    if (openStatesRef.current.length === 0 && arrayFields.length > 0) {
-      const defaultCollapsed =
-        isCollapsible &&
-        typeof field.list === 'object' &&
-        field.list.collapsible &&
-        typeof field.list.collapsible === 'object' &&
-        field.list.collapsible.collapsed;
-      
-      openStatesRef.current = Array(arrayFields.length).fill(!defaultCollapsed);
-      forceUpdate({});
-    }
-  }, [arrayFields.length, field.list]);
-  
-  const toggleOpen = (index: number) => {
-    if (index >= 0 && index < openStatesRef.current.length) {
-      openStatesRef.current[index] = !openStatesRef.current[index];
-      forceUpdate({});
-    }
-  };
+  const [openStates, setOpenStates] = useState<boolean[]>([]);
+  const shouldShowListHeader =
+    field.label !== false ||
+    field.required ||
+    (isCollapsible && arrayFields.length > 0);
+  const isReadonly = Boolean(field.readonly);
 
-  const handleDragEnd = (event: any) => {
+  useEffect(() => {
+    setOpenStates((prev) => {
+      if (prev.length === arrayFields.length) {
+        return prev;
+      }
+      if (prev.length === 0 && arrayFields.length > 0) {
+        return Array(arrayFields.length).fill(defaultOpen);
+      }
+      if (prev.length < arrayFields.length) {
+        return [
+          ...prev,
+          ...Array(arrayFields.length - prev.length).fill(defaultOpen),
+        ];
+      }
+      return prev.slice(0, arrayFields.length);
+    });
+  }, [arrayFields.length, defaultOpen]);
+
+  const toggleOpen = useCallback((index: number) => {
+    setOpenStates((prev) =>
+      prev.map((isOpen, currentIndex) =>
+        currentIndex === index ? !isOpen : isOpen,
+      ),
+    );
+  }, []);
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    if (isReadonly) return;
     const { active, over } = event;
-    if (active.id !== over.id) {
-      const oldIndex = arrayFields.findIndex(item => item.id === active.id);
-      const newIndex = arrayFields.findIndex(item => item.id === over.id);
-      
-      // Reorder the open states array the same way as the items
-      const newOpenStates = [...openStatesRef.current];
-      const [movedState] = newOpenStates.splice(oldIndex, 1);
-      newOpenStates.splice(newIndex, 0, movedState);
-      openStatesRef.current = newOpenStates;
-      
-      // Perform the move
-      move(oldIndex, newIndex);
-      
-      // Update form values
-      const updatedValues = arrayMove(fieldValues, oldIndex, newIndex);
-      setValue(fieldName, updatedValues);
-      
-      // Force update to reflect the reordered open states
-      forceUpdate({});
-    }
+    if (!over || active.id === over.id) return;
+
+    const oldIndex = arrayFields.findIndex((item) => item.id === active.id);
+    const newIndex = arrayFields.findIndex((item) => item.id === over.id);
+
+    if (oldIndex < 0 || newIndex < 0) return;
+
+    setOpenStates((prev) => arrayMove(prev, oldIndex, newIndex));
+    move(oldIndex, newIndex);
   };
 
   const addItem = () => {
-    append(field.type === 'object'
-      ? initializeState(field.fields, {})
-      : getDefaultValue(field)
+    if (isReadonly) return;
+    append(
+      field.type === "object"
+        ? initializeState(field.fields, {})
+        : getDefaultValue(field),
     );
-    openStatesRef.current.push(true);
-    forceUpdate({});
+    setOpenStates((prev) => [...prev, true]);
   };
 
-  const removeItem = (index: number) => {
-    remove(index);
-    openStatesRef.current.splice(index, 1);
-    forceUpdate({});
-  };
-  
-  const sensors = useSensors(
-    useSensor(PointerSensor),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    })
+  const removeItem = useCallback(
+    (index: number) => {
+      if (isReadonly) return;
+      remove(index);
+      setOpenStates((prev) =>
+        prev.filter((_, currentIndex) => currentIndex !== index),
+      );
+    },
+    [isReadonly, remove],
+  );
+  const [pendingRemoveIndex, setPendingRemoveIndex] = useState<number | null>(
+    null,
   );
 
-  const modifiers = [restrictToVerticalAxis, restrictToParentElement]
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 6,
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
+
+  const modifiers = useMemo(
+    () => [restrictToVerticalAxis, restrictToParentElement],
+    [],
+  );
+  const sortableItems = useMemo(
+    () => arrayFields.map((item) => item.id),
+    [arrayFields],
+  );
+
+  const handleToggleOpen = useCallback(
+    (index: number) => {
+      toggleOpen(index);
+    },
+    [toggleOpen],
+  );
+  const handleRequestRemove = useCallback((index: number) => {
+    setPendingRemoveIndex(index);
+  }, []);
+  const handlePendingRemoveChange = useCallback(
+    (index: number, open: boolean) => {
+      if (open) return;
+      setPendingRemoveIndex((prev) => (prev === index ? null : prev));
+    },
+    [],
+  );
+  const handleRemoveConfirm = useCallback(
+    (index: number) => {
+      removeItem(index);
+      setPendingRemoveIndex(null);
+    },
+    [removeItem],
+  );
 
   const toggleAll = (collapsed: boolean) => {
-    openStatesRef.current = Array(openStatesRef.current.length).fill(!collapsed);
-    forceUpdate({});
+    setOpenStates(Array(arrayFields.length).fill(!collapsed));
   };
 
   // We don't render <FormMessage/> in ListField, because it's already rendered in the individual fields
   return (
     <FormField
       name={fieldName}
-      render={({ field: formField, fieldState: { error } }) => (
+      render={() => (
         <FormItem>
-          <div className="flex items-center h-5 gap-x-2">
-            {field.label !== false &&
-              <FormLabel className="text-sm font-medium">
-                {field.label || field.name}   
-              </FormLabel>
-            }
-            {field.required && (
-              <span className="inline-flex items-center rounded-full bg-muted border px-2 h-5 text-xs font-medium">Required</span>
-            )}
-            
-            {
-              isCollapsible && arrayFields.length > 0 && (
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" type="button" size="icon-xs" className="h-5 w-5 text-muted-foreground hover:text-foreground bg-transparent">
-                      <Ellipsis className="h-4 w-4" />
+          {shouldShowListHeader && (
+            <div className="flex items-center h-5 gap-x-2">
+              {field.label !== false && (
+                <FormLabel className="text-sm font-medium">
+                  {field.label || field.name}
+                </FormLabel>
+              )}
+              {field.required && (
+                <Badge variant="secondary" className="text-muted-foreground">
+                  Required
+                </Badge>
+              )}
+              {hasExplicitReadonly(field) && (
+                <Badge variant="secondary" className="text-muted-foreground">
+                  Readonly
+                </Badge>
+              )}
+              {isCollapsible &&
+                arrayFields.length > 0 &&
+                (() => {
+                  const isAllExpanded =
+                    openStates.length > 0 && openStates.every(Boolean);
+                  return (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      className="ml-auto text-muted-foreground hover:text-foreground"
+                      onClick={() => toggleAll(isAllExpanded)}
+                    >
+                      {isAllExpanded ? (
+                        <ChevronsDownUp className="h-4 w-4" />
+                      ) : (
+                        <ChevronsUpDown className="h-4 w-4" />
+                      )}
+                      {isAllExpanded ? "Collapse all" : "Expand all"}
                     </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent>
-                  <DropdownMenuItem onClick={() => toggleAll(true)}>
-                      Collapse all
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => toggleAll(false)}>
-                      Expand all
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              )
-            }
-          </div>
+                  );
+                })()}
+            </div>
+          )}
           <div className="space-y-2">
-            <DndContext sensors={sensors} modifiers={modifiers} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-              <SortableContext items={arrayFields.map(item => item.id)} strategy={verticalListSortingStrategy}>
+            <DndContext
+              sensors={sensors}
+              modifiers={modifiers}
+              collisionDetection={closestCenter}
+              onDragEnd={handleDragEnd}
+            >
+              <SortableContext
+                items={sortableItems}
+                strategy={verticalListSortingStrategy}
+              >
                 {arrayFields.map((arrayField, index) => (
-                  <SortableItem key={arrayField.id} id={arrayField.id} type={field.type}>
-                    <div className="grid gap-6 flex-1">
-                      <SingleField
-                        field={field}
-                        fieldName={`${fieldName}.${index}`}
-                        renderFields={renderFields}
-                        showLabel={false}
-                        isOpen={openStatesRef.current[index]}
-                        toggleOpen={() => toggleOpen(index)}
-                        index={index}
-                      />
-                    </div>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button type="button" variant="ghost" size="icon" className="bg-muted/50 text-muted-foreground self-start" onClick={() => removeItem(index)}>
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        Remove item
-                      </TooltipContent>
-                    </Tooltip>
-                  </SortableItem>
+                  <ListItemRow
+                    key={arrayField.id}
+                    id={arrayField.id}
+                    field={field}
+                    fieldName={fieldName}
+                    index={index}
+                    isOpen={openStates[index]}
+                    defaultOpen={defaultOpen}
+                    isPendingRemove={pendingRemoveIndex === index}
+                    renderFields={renderFields}
+                    registerBeforeSubmitHook={registerBeforeSubmitHook}
+                    onToggleOpen={handleToggleOpen}
+                    onRequestRemove={handleRequestRemove}
+                    onRemoveConfirm={handleRemoveConfirm}
+                    onPendingRemoveChange={handlePendingRemoveChange}
+                  />
                 ))}
               </SortableContext>
             </DndContext>
-            {typeof field.list === 'object' && field.list?.max && arrayFields.length >= field.list.max
-              ? null
-              : <Button
+            <div className="flex items-center gap-2 flex-wrap">
+              {isReadonly ? null : typeof field.list === "object" &&
+                field.list?.max &&
+                arrayFields.length >= field.list.max ? null : (
+                <Button
                   type="button"
                   variant="outline"
                   size="sm"
                   onClick={addItem}
-                  className="gap-x-2"
                 >
-                  <Plus className="h-4 w-4" />
+                  <Plus />
                   Add an item
                 </Button>
-            }
+              )}
+            </div>
             <FormMessage />
           </div>
         </FormItem>
@@ -289,273 +549,455 @@ const ListField = ({
   );
 };
 
-const BlocksField = forwardRef((props: any, ref) => {
-  const { field, fieldName, renderFields, isOpen, onToggleOpen, index } = props;
+const BlocksField = forwardRef<HTMLDivElement, NestedFieldProps>(
+  (props, ref) => {
+    const {
+      field,
+      fieldName,
+      renderFields,
+      registerBeforeSubmitHook,
+      isOpen,
+      onToggleOpen,
+      index,
+    } = props;
 
-  const isCollapsible = !!(field.list && !(typeof field.list === 'object' && field.list?.collapsible === false));
-  
-  const { setValue, watch, formState: { errors } } = useFormContext();
-  
-  const value = watch(fieldName);
-  const onChange = (val: any) => {
-    setValue(fieldName, val, { shouldDirty: true });
-  }
+    const isCollapsible = !!(
+      field.list &&
+      !(typeof field.list === "object" && field.list?.collapsible === false)
+    );
 
-  const hasErrors = () => {
-    let curr: any = errors;
-    return fieldName.split('.').every((part: string) => (curr = curr?.[part]) !== undefined) && !!curr;
-  };
+    const {
+      control,
+      setValue,
+      formState: { errors },
+    } = useFormContext();
 
-  const { blocks = [] } = field;
-  const blockKey = field.blockKey || "_block";
-  const selectedBlockName = value?.[blockKey];
+    const value = useWatch({ control, name: fieldName });
+    const onChange = (val: Record<string, unknown> | null) => {
+      setValue(fieldName, val, { shouldDirty: true });
+    };
 
-  const handleBlockSelect = (blockName: string) => {
-    const selectedBlockDef = blocks.find((b: Field) => b.name === blockName);
-    if (!selectedBlockDef) return;
-    let initialState: Record<string, any> = { [blockKey]: blockName };
-    if (selectedBlockDef.fields) {
-      const choiceDefaults = initializeState(selectedBlockDef.fields, {});
-      initialState = { ...initialState, ...choiceDefaults };
-    }
-    onChange(initialState);
-  };
+    const hasErrors = () => {
+      return hasFieldPathError(errors, fieldName);
+    };
 
-  const handleRemoveBlock = () => {
-    onChange(null);
-  };
+    const { blocks = [] } = field;
+    const blockKey = field.blockKey || "_block";
+    const selectedBlockName = value?.[blockKey];
+    const [isRemoveBlockDialogOpen, setIsRemoveBlockDialogOpen] =
+      useState(false);
+    const isReadonly = Boolean(field.readonly);
 
-  const selectedBlockDefinition = useMemo(() => {
-    const definition = blocks.find((b: Field) => b.name === selectedBlockName);
-    return definition;
-  }, [blocks, selectedBlockName]);
+    const handleBlockSelect = (blockName: string) => {
+      if (isReadonly) return;
+      const selectedBlockDef = blocks.find((b: Field) => b.name === blockName);
+      if (!selectedBlockDef) return;
+      let initialState: Record<string, unknown> = { [blockKey]: blockName };
+      if (selectedBlockDef.fields) {
+        const choiceDefaults = initializeState(selectedBlockDef.fields, {});
+        initialState = { ...initialState, ...choiceDefaults };
+      }
+      onChange(initialState);
+    };
 
-  const fieldValues = watch(fieldName);
-  const interpolateData = {
-    index: index !== undefined ? `${index + 1}` : '',
-    fields: fieldValues,
-  }
-  const itemLabel = 
-    typeof field.list === 'object' && 
-    field.list.collapsible && 
-    typeof field.list.collapsible === 'object' && 
-    field.list.collapsible.summary
-      ? interpolate(field.list.collapsible.summary, interpolateData)
-      : `Item ${index !== undefined ? `#${index + 1}` : ''}`;
+    const handleRemoveBlock = () => {
+      if (isReadonly) return;
+      onChange(null);
+    };
 
-  return (
-    <div className="space-y-3" ref={ref as React.Ref<HTMLDivElement>}>
-      {!selectedBlockDefinition ? (
-        <div className="rounded-lg border">
-          <header className="flex items-center gap-x-2 rounded-t-lg pl-4 pr-1 h-10 text-sm font-medium">
-            <span>Choose content block:</span>
-          </header>
-          <div className="flex flex-wrap gap-2 p-4">
-            {blocks.map((blockDef: Field) => (
-              <Button
-                key={blockDef.name}
-                type="button"
-                variant="secondary"
-                size="sm"
-                className="gap-x-2"
-                onClick={() => handleBlockSelect(blockDef.name)}
-              >
-                {blockDef.label || blockDef.name}
-                <Plus className="h-4 w-4 text-muted-foreground" />
-              </Button>
-            ))}
+    const selectedBlockDefinition = useMemo(() => {
+      const definition = blocks.find(
+        (b: Field) => b.name === selectedBlockName,
+      );
+      return definition;
+    }, [blocks, selectedBlockName]);
+
+    const itemLabel = getCollapsibleItemLabel(field, value, index);
+
+    return (
+      <div className="space-y-3" ref={ref as React.Ref<HTMLDivElement>}>
+        {!selectedBlockDefinition ? (
+          <div className="rounded-lg border p-4 space-y-4">
+            <div className="text-sm">Choose content block:</div>
+            <div className="flex flex-wrap gap-2">
+              {blocks.map((blockDef: Field) => (
+                <Button
+                  key={blockDef.name}
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-x-2"
+                  onClick={() => handleBlockSelect(blockDef.name)}
+                  disabled={isReadonly}
+                >
+                  {blockDef.label || blockDef.name}
+                </Button>
+              ))}
+            </div>
           </div>
-        </div>
-      ) : (
-        <div className="border rounded-lg">
+        ) : (
+          <div>
+            <header
+              className={cn(
+                "flex items-center gap-x-2 px-4 h-9 text-sm font-medium transition-colors rounded-t-lg border",
+                isOpen ? "" : "rounded-b-lg",
+                isCollapsible ? "cursor-pointer hover:bg-muted" : "",
+              )}
+              onClick={isCollapsible ? onToggleOpen : undefined}
+            >
+              {isCollapsible && (
+                <>
+                  <ChevronRight
+                    className={cn(
+                      "size-4 transition-transform shrink-0",
+                      isOpen ? "rotate-90" : "",
+                    )}
+                  />
+                  <span
+                    className={cn(
+                      "truncate",
+                      hasErrors() ? "text-destructive" : "",
+                    )}
+                  >
+                    {itemLabel}
+                  </span>
+                </>
+              )}
+              <Badge
+                className="text-muted-foreground ml-auto -mr-2"
+                variant="outline"
+              >
+                {selectedBlockDefinition.label || selectedBlockDefinition.name}
+
+                {!isReadonly && (
+                  <Tooltip>
+                    <AlertDialog
+                      open={isRemoveBlockDialogOpen}
+                      onOpenChange={setIsRemoveBlockDialogOpen}
+                    >
+                      <TooltipTrigger asChild>
+                        <AlertDialogTrigger asChild>
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setIsRemoveBlockDialogOpen(true);
+                            }}
+                            className="text-muted-foreground hover:text-foreground -my-0.5 -mx-2 px-2 transition-colors"
+                          >
+                            <X className="size-3" />
+                          </button>
+                        </AlertDialogTrigger>
+                      </TooltipTrigger>
+                      <AlertDialogContent
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>
+                            Remove this block?
+                          </AlertDialogTitle>
+                          <AlertDialogDescription>
+                            This action cannot be undone.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Cancel</AlertDialogCancel>
+                          <AlertDialogAction
+                            onClick={() => {
+                              handleRemoveBlock();
+                              setIsRemoveBlockDialogOpen(false);
+                            }}
+                          >
+                            Remove
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                    <TooltipContent>Remove block</TooltipContent>
+                  </Tooltip>
+                )}
+              </Badge>
+            </header>
+            <div
+              className={cn(
+                "p-4 grid gap-6 border border-t-0 rounded-b-lg",
+                isOpen ? "" : "hidden",
+              )}
+            >
+              {selectedBlockDefinition.type === "object" ? (
+                (() => {
+                  const renderedElements = renderFields(
+                    selectedBlockDefinition.fields || [],
+                    fieldName,
+                    registerBeforeSubmitHook,
+                    isReadonly,
+                  );
+                  return renderedElements;
+                })()
+              ) : (
+                <SingleField
+                  field={
+                    isReadonly
+                      ? {
+                          ...selectedBlockDefinition,
+                          readonly: true,
+                          __inheritedReadonly: true,
+                        }
+                      : selectedBlockDefinition
+                  }
+                  fieldName={fieldName}
+                  renderFields={renderFields}
+                  registerBeforeSubmitHook={registerBeforeSubmitHook}
+                  showLabel={false}
+                />
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  },
+);
+
+BlocksField.displayName = "BlocksField";
+
+const ObjectFieldSummaryLabel = ({
+  field,
+  fieldName,
+  index,
+}: {
+  field: FieldWithReadonlyMeta;
+  fieldName: string;
+  index?: number;
+}) => {
+  const { control } = useFormContext();
+  const fieldValues = useWatch({ control, name: fieldName });
+  return <>{getCollapsibleItemLabel(field, fieldValues, index)}</>;
+};
+
+const ObjectField = forwardRef<HTMLDivElement, NestedFieldProps>(
+  (props, ref) => {
+    const {
+      field,
+      fieldName,
+      renderFields,
+      registerBeforeSubmitHook,
+      isOpen = true,
+      onToggleOpen = () => {},
+      index,
+    } = props;
+
+    const isCollapsible = !!(
+      field.list &&
+      !(typeof field.list === "object" && field.list?.collapsible === false)
+    );
+
+    const {
+      formState: { errors },
+    } = useFormContext();
+
+    const hasErrors = () => {
+      return hasFieldPathError(errors, fieldName);
+    };
+
+    const itemLabel = hasCollapsibleSummary(field) ? (
+      <ObjectFieldSummaryLabel
+        field={field}
+        fieldName={fieldName}
+        index={index}
+      />
+    ) : (
+      `Item ${index !== undefined ? `#${index + 1}` : ""}`
+    );
+
+    return (
+      <div>
+        {isCollapsible && (
           <header
             className={cn(
-              "flex items-center gap-x-2 px-4 h-10 text-sm font-medium transition-colors rounded-t-lg", 
-              isOpen ? 'border-b' : 'rounded-b-lg', 
-              isCollapsible ? 'cursor-pointer hover:bg-muted' : ''
+              "flex items-center gap-x-2 rounded-t-lg pl-4 pr-1 h-9 text-sm font-medium hover:bg-muted transition-colors cursor-pointer border",
+              isOpen ? "" : "rounded-b-lg",
             )}
-            onClick={isCollapsible ? onToggleOpen : undefined}
+            onClick={onToggleOpen}
           >
-            {isCollapsible && (
-              <>
-                <ChevronRight className={cn("h-4 w-4 transition-transform", isOpen ? 'rotate-90' : '')} />
-                <span className={cn('mr-auto', hasErrors() ? 'text-red-500' : '')}>{itemLabel}</span>
-              </>
-            )}
-            <div className="inline-flex items-center gap-x-0.5 text-muted-foreground">
-              <span className={hasErrors() ? 'text-red-500' : ''}>{selectedBlockDefinition.label || selectedBlockDefinition.name}</span>
-              
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" type="button" size="icon-xs" className="text-muted-foreground hover:text-foreground bg-transparent">
-                    <Ellipsis className="h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent>
-                  <DropdownMenuItem onClick={handleRemoveBlock}>
-                    Remove block
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
+            <ChevronRight
+              className={cn(
+                "h-4 w-4 transition-transform",
+                isOpen ? "rotate-90" : "",
+              )}
+            />
+            <span className={hasErrors() ? "text-destructive" : ""}>
+              {itemLabel}
+            </span>
           </header>
-          <div className={cn("p-4 grid gap-6", isOpen ? '' : 'hidden')}>
-            {selectedBlockDefinition.type === 'object' ? (
-              (() => {
-                const renderedElements = renderFields(
-                  selectedBlockDefinition.fields || [],
-                  fieldName
-                );
-                return renderedElements;
-              })()
-            ) : (
-              <SingleField
-                field={selectedBlockDefinition}
-                fieldName={fieldName}
-                renderFields={renderFields}
-                showLabel={false}
-              />
-            )}
-          </div>
+        )}
+        <div
+          className={cn(
+            "p-4 grid gap-6",
+            isCollapsible && "border-x border-b rounded-b-lg",
+            isOpen ? "" : "hidden",
+          )}
+        >
+          {renderFields(
+            field.fields || [],
+            fieldName,
+            registerBeforeSubmitHook,
+            Boolean(field.readonly),
+          )}
         </div>
-      )}
-    </div>
-  );
-});
-
-BlocksField.displayName = 'BlocksField';
-
-const ObjectField = forwardRef((props: any, ref) => {
-  const { field, fieldName, renderFields, isOpen = true, onToggleOpen = () => {}, index } = props;
-  
-  const isCollapsible = !!(field.list && !(typeof field.list === 'object' && field.list?.collapsible === false));
-
-  const { watch, formState: { errors } } = useFormContext();
-
-  const hasErrors = () => {
-    let curr: any = errors;
-    return fieldName.split('.').every((part: string) => (curr = curr?.[part]) !== undefined) && !!curr;
-  };
-
-  const fieldValues = watch(fieldName);
-  const interpolateData = {
-    index: index !== undefined ? `${index + 1}` : '',
-    fields: fieldValues,
-  }
-  const itemLabel = 
-    typeof field.list === 'object' && 
-    field.list.collapsible && 
-    typeof field.list.collapsible === 'object' && 
-    field.list.collapsible.summary
-      ? interpolate(field.list.collapsible.summary, interpolateData)
-      : `Item ${index !== undefined ? `#${index + 1}` : ''}`;
-  
-  return (
-    <div className="border rounded-lg">
-      {isCollapsible && (
-        <header className={cn("flex items-center gap-x-2 rounded-t-lg pl-4 pr-1 h-10 text-sm font-medium hover:bg-muted transition-colors cursor-pointer", isOpen ? 'border-b' : 'rounded-b-lg')} onClick={onToggleOpen}>
-          <ChevronRight className={cn("h-4 w-4 transition-transform", isOpen ? 'rotate-90' : '')} />
-          <span className={hasErrors() ? 'text-red-500' : ''}>{itemLabel}</span>
-        </header>
-      )}
-      <div className={cn("p-4 grid gap-6", isOpen ? '' : 'hidden')}>
-        {renderFields(field.fields, fieldName)}
       </div>
-    </div>
-  );
-});
+    );
+  },
+);
 
-ObjectField.displayName = 'ObjectField';
+ObjectField.displayName = "ObjectField";
 
 const SingleField = ({
   field,
   fieldName,
   renderFields,
+  registerBeforeSubmitHook,
+  onChangeRegistered,
   showLabel = true,
   isOpen = true,
   toggleOpen = () => {},
-  index = 0
+  index = 0,
 }: {
-  field: Field;
+  field: FieldWithReadonlyMeta;
   fieldName: string;
-  renderFields: Function;
+  renderFields: RenderFields;
+  registerBeforeSubmitHook?: RegisterBeforeSubmitHook;
+  onChangeRegistered?: () => void;
   showLabel?: boolean;
   isOpen?: boolean;
   toggleOpen?: () => void;
   index?: number;
 }) => {
-  const { control, formState: { errors } } = useFormContext();
-  
-  let FieldComponent;
+  const {
+    control,
+    formState: { errors },
+  } = useFormContext();
+  const isRichTextField = field.type === "rich-text";
+  const showLabelSlot = isRichTextField && field.options?.switcher !== false;
+  const shouldShowFieldMeta =
+    showLabel && (field.label !== false || field.required || showLabelSlot);
+  const rawLabelSlotId = useId();
+  const labelSlotId = useMemo(
+    () => `field-label-slot-${rawLabelSlotId.replace(/[^a-zA-Z0-9_-]/g, "")}`,
+    [rawLabelSlotId],
+  );
 
-  const isCollapsible = !!(field.list && !(typeof field.list === 'object' && field.list?.collapsible === false));
+  const isCollapsible = !!(
+    field.list &&
+    !(typeof field.list === "object" && field.list?.collapsible === false)
+  );
 
-  if (field.type === 'block') {
-    FieldComponent = BlocksField;
-  } else if (field.type === 'object') {
-    FieldComponent = ObjectField;
-  } else if (typeof field.type === 'string' && editComponents[field.type]) {
-    FieldComponent = editComponents[field.type];
-  } else {
-    console.warn(`No component found for field type: ${field.type}. Defaulting to 'text'.`);
-    FieldComponent = editComponents['text'];
-  }
-
-  let fieldComponentProps: any = { field: field };
-  if (['object', 'block'].includes(field.type)) {
-    fieldComponentProps = { ...fieldComponentProps, fieldName, renderFields, isOpen };
-    if (isCollapsible) {
-      fieldComponentProps = { ...fieldComponentProps, onToggleOpen: toggleOpen, index };
-    }
-  }
-  
-  if (['object', 'block'].includes(field.type)) {
-    const hasErrors = () => {
-      let curr: any = errors;
-      return fieldName.split('.').every((part: string) => (curr = curr?.[part]) !== undefined) && !!curr;
-    };
+  if (["object", "block"].includes(field.type)) {
+    const hasErrors = () => hasFieldPathError(errors, fieldName);
+    const NestedComponent = field.type === "block" ? BlocksField : ObjectField;
 
     return (
       <FormItem key={fieldName}>
-        {showLabel &&
+        {shouldShowFieldMeta && (
           <div className="flex items-center h-5 gap-x-2">
-            {field.label !== false &&
-              <Label className={hasErrors() ? "text-red-500" : ""}>
+            {field.label !== false && (
+              <Label className={hasErrors() ? "text-destructive" : ""}>
                 {field.label || field.name}
               </Label>
-            }
-            {field.required &&
-              <span className="inline-flex items-center rounded-full bg-muted border px-2 h-5 text-xs font-medium">Required</span>
-            }
+            )}
+            {field.required && (
+              <Badge variant="secondary" className="text-muted-foreground">
+                Required
+              </Badge>
+            )}
+            {hasExplicitReadonly(field) && (
+              <Badge variant="secondary" className="text-muted-foreground">
+                Readonly
+              </Badge>
+            )}
           </div>
-        }
-        <FieldComponent {...fieldComponentProps} />
-        {field.description && <FormDescription>{field.description}</FormDescription>}
+        )}
+        <NestedComponent
+          field={field}
+          fieldName={fieldName}
+          renderFields={renderFields}
+          registerBeforeSubmitHook={registerBeforeSubmitHook}
+          isOpen={isOpen}
+          onToggleOpen={isCollapsible ? toggleOpen : undefined}
+          index={isCollapsible ? index : undefined}
+        />
+        {field.description && (
+          <FormDescription>{field.description}</FormDescription>
+        )}
       </FormItem>
     );
   } else {
+    let FieldComponent;
+
+    if (typeof field.type === "string" && editComponents[field.type]) {
+      FieldComponent = editComponents[field.type];
+    } else {
+      console.warn(
+        `No component found for field type: ${field.type}. Defaulting to 'text'.`,
+      );
+      FieldComponent = editComponents["text"];
+    }
+
     return (
       <FormField
         name={fieldName}
         key={fieldName}
         control={control}
-        render={({ field: rhfManagedFieldProps, fieldState }) => (
+        render={({ field: rhfManagedFieldProps }) => (
           <FormItem>
-            <div className="flex items-center h-5 gap-x-2">
-              {showLabel && field.label !== false &&
-                <FormLabel>
-                  {field.label || field.name}
-                </FormLabel>
-              }
-              {showLabel && field.required && <span className="inline-flex items-center rounded-full bg-muted border px-2 h-5 text-xs font-medium">Required</span>}
-            </div>
+            {shouldShowFieldMeta && (
+              <div className="flex items-center justify-between min-h-6 gap-x-2">
+                <div className="flex items-center gap-x-2 min-w-0">
+                  {field.label !== false && (
+                    <FormLabel>{field.label || field.name}</FormLabel>
+                  )}
+                  {field.required && (
+                    <Badge
+                      variant="secondary"
+                      className="text-muted-foreground"
+                    >
+                      Required
+                    </Badge>
+                  )}
+                  {hasExplicitReadonly(field) && (
+                    <Badge
+                      variant="secondary"
+                      className="text-muted-foreground"
+                    >
+                      Readonly
+                    </Badge>
+                  )}
+                </div>
+                {showLabelSlot && <div id={labelSlotId} className="shrink-0" />}
+              </div>
+            )}
             <FormControl>
-              <FieldComponent 
-                {...rhfManagedFieldProps}
-                {...fieldComponentProps}
-              />
+              {(() => {
+                const sharedProps = {
+                  ...rhfManagedFieldProps,
+                  field,
+                };
+                if (field.type === "rich-text") {
+                  return (
+                    <FieldComponent
+                      {...sharedProps}
+                      labelSlotId={showLabelSlot ? labelSlotId : undefined}
+                      registerBeforeSubmitHook={registerBeforeSubmitHook}
+                      onChangeRegistered={onChangeRegistered}
+                    />
+                  );
+                }
+                return <FieldComponent {...sharedProps} />;
+              })()}
             </FormControl>
-            {field.description && <FormDescription>{field.description}</FormDescription>}
+            {field.description && (
+              <FormDescription>{field.description}</FormDescription>
+            )}
             <FormMessage />
           </FormItem>
         )}
@@ -564,31 +1006,23 @@ const SingleField = ({
   }
 };
 
-SingleField.displayName = 'SingleField';
+SingleField.displayName = "SingleField";
 
 const EntryForm = ({
-  title,
-  navigateBack,
   fields,
   contentObject,
-  onSubmit = (values) => console.log("Default onSubmit:", values),
-  history,
-  path,
+  onSubmit = () => {},
   filePath,
-  options,
+  onDirtyChange,
+  onChangeRegistered,
 }: {
-  title: string;
-  navigateBack?: string;
   fields: Field[];
-  contentObject?: any;
-  onSubmit: (values: any) => void;
-  history?: Record<string, any>[];
-  path?: string;
+  contentObject?: Record<string, unknown>;
+  onSubmit: (values: Record<string, unknown>) => void;
   filePath?: React.ReactNode;
-  options: React.ReactNode;
+  onDirtyChange?: (isDirty: boolean) => void;
+  onChangeRegistered?: () => void;
 }) => {
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
   const zodSchema = useMemo(() => {
     return generateZodSchema(fields);
   }, [fields]);
@@ -600,96 +1034,121 @@ const EntryForm = ({
   const form = useForm({
     resolver: zodSchema && zodResolver(zodSchema),
     defaultValues,
-    reValidateMode: "onSubmit"
+    reValidateMode: "onSubmit",
   });
 
-  const { isDirty } = useFormState({
-    control: form.control
-  });
+  useEffect(() => {
+    form.reset(defaultValues);
+  }, [defaultValues, form]);
 
-  const renderFields = useCallback((
-    fields: Field[],
-    parentName?: string
-  ): React.ReactNode[] => {
-    return fields.map((field) => {
-      if (!field || field.hidden) return null;
-      const currentFieldName = parentName ? `${parentName}.${field.name}` : field.name;
+  useEffect(() => {
+    onDirtyChange?.(form.formState.isDirty);
+  }, [form.formState.isDirty, onDirtyChange]);
 
-      if (field.list === true || (typeof field.list === 'object' && field.list !== null)) {
-        return <ListField key={currentFieldName} field={field} fieldName={currentFieldName} renderFields={renderFields} />;
-      }
-      return <SingleField key={currentFieldName} field={field} fieldName={currentFieldName} renderFields={renderFields} />;
-    });
+  const beforeSubmitHooksRef = useRef<Map<string, BeforeSubmitHook>>(new Map());
+
+  const registerBeforeSubmitHook = useCallback(
+    (key: string, hook: BeforeSubmitHook) => {
+      beforeSubmitHooksRef.current.set(key, hook);
+      return () => {
+        beforeSubmitHooksRef.current.delete(key);
+      };
+    },
+    [],
+  );
+
+  const renderFields: RenderFields = useCallback(
+    (
+      fields: FieldWithReadonlyMeta[],
+      parentName?: string,
+      registerBeforeSubmitHook?: RegisterBeforeSubmitHook,
+      inheritedReadonly = false,
+    ): React.ReactNode[] => {
+      return fields.map((field) => {
+        if (!field || field.hidden) return null;
+        const effectiveField =
+          inheritedReadonly && !field.readonly
+            ? { ...field, readonly: true, __inheritedReadonly: true }
+            : field;
+        const currentFieldName = parentName
+          ? `${parentName}.${effectiveField.name}`
+          : effectiveField.name;
+
+        if (
+          effectiveField.list === true ||
+          (typeof effectiveField.list === "object" &&
+            effectiveField.list !== null)
+        ) {
+          return (
+            <ListField
+              key={currentFieldName}
+              field={effectiveField}
+              fieldName={currentFieldName}
+              renderFields={renderFields}
+              registerBeforeSubmitHook={registerBeforeSubmitHook}
+            />
+          );
+        }
+        return (
+          <SingleField
+            key={currentFieldName}
+            field={effectiveField}
+            fieldName={currentFieldName}
+            renderFields={renderFields}
+            registerBeforeSubmitHook={registerBeforeSubmitHook}
+            onChangeRegistered={onChangeRegistered}
+          />
+        );
+      });
+    },
+    [onChangeRegistered],
+  );
+
+  const runBeforeValidationHooks = useCallback(async () => {
+    const hooks = Array.from(beforeSubmitHooksRef.current.values());
+    for (const hook of hooks) {
+      await hook();
+    }
   }, []);
 
-  const handleSubmit = async (values: any) => {
-    setIsSubmitting(true);
-    try {
-      await onSubmit(values);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
+  const handleSubmit = useCallback(
+    async (values: Record<string, unknown>) => {
+      const latestValues = form.getValues() as Record<string, unknown>;
+      await onSubmit(latestValues);
+    },
+    [form, onSubmit],
+  );
 
-  const handleError = (errors: any) => {
+  const handleError = () => {
     toast.error("Please fix the errors before saving.", { duration: 5000 });
   };
 
+  const handleFormSubmit = useCallback(
+    async (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      await runBeforeValidationHooks();
+      await form.handleSubmit(handleSubmit, handleError)(event);
+    },
+    [form, handleSubmit, runBeforeValidationHooks],
+  );
+
   return (
     <Form {...form}>
-      <form onSubmit={form.handleSubmit(handleSubmit, handleError)}>
-        <div className="max-w-screen-xl mx-auto flex w-full gap-x-8">
-          <div className="flex-1 w-0">
-            <header className="flex items-center mb-6">
-              {navigateBack &&
-                <Link
-                  className={cn(buttonVariants({ variant: "outline", size: "icon-xs" }), "mr-4 shrink-0")}
-                  href={navigateBack}
-                >
-                  <ChevronLeft className="h-4 w-4" />
-                </Link>
-              }
-
-              <h1 className="font-semibold text-lg md:text-2xl truncate">{title}</h1>
-            </header>
-            
-            <div onSubmit={form.handleSubmit(handleSubmit)} className="grid items-start gap-6">
-              {filePath &&
-                <div className="space-y-2 overflow-hidden">
-                  <FormLabel>
-                    Filename
-                  </FormLabel>
-                  {filePath}
-                </div>
-              }
-              {renderFields(fields)}
-            </div>
+      <form
+        id="entry-form"
+        onSubmit={handleFormSubmit}
+        className="w-full max-w-screen-md mx-auto grid items-start gap-6"
+      >
+        {filePath && (
+          <div className="space-y-2 overflow-hidden">
+            <FormLabel>Filename</FormLabel>
+            {filePath}
           </div>
-
-          <div className="hidden lg:block w-64">
-            <div className="flex flex-col gap-y-4 sticky top-0">
-              <div className="flex gap-x-2">
-                <Button type="submit" className="w-full" disabled={isSubmitting || !isDirty}>
-                  Save
-                  {isSubmitting && (<Loader className="ml-2 h-4 w-4 animate-spin" />)}
-                </Button>
-                {options ? options : null}
-              </div>
-              {path && history && <EntryHistoryBlock history={history} path={path} />}
-            </div>
-          </div>
-          <div className="lg:hidden fixed top-0 right-0 h-14 flex items-center gap-x-2 z-10 pr-4 md:pr-6">
-            {path && history && <EntryHistoryDropdown history={history} path={path} />}
-            <Button type="submit" disabled={isSubmitting}>
-              Save
-              {isSubmitting && (<Loader className="ml-2 h-4 w-4 animate-spin" />)}
-            </Button>
-            {options ? options : null}
-          </div>
-        </div>
+        )}
+        {renderFields(fields, undefined, registerBeforeSubmitHook)}
       </form>
     </Form>
   );
 };
 
-export { EntryForm }
+export { EntryForm };

@@ -6,6 +6,7 @@ import { useRepo } from "@/contexts/repo-context";
 import { useConfig } from "@/contexts/config-context";
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
+import { requireApiSuccess } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { Check, Loader } from "lucide-react";
 
@@ -46,11 +47,7 @@ export function RepoBranches() {
               name: newBranch
             }),
           });
-          if (!response.ok) throw new Error(`Failed to create branch: ${response.status} ${response.statusText}`);
-          
-          const data: any = await response.json();
-      
-          if (data.status !== "success") throw new Error(data.message);
+          await requireApiSuccess<any>(response, "Failed to create branch");
 
           if (branches) {
             setBranches([...branches, newBranch]);
@@ -86,7 +83,7 @@ export function RepoBranches() {
           {isSubmitting && (<Loader className="ml-2 h-4 w-4 animate-spin" />)}
         </Button>
       </header>
-      <main className="flex flex-col gap-y-1 overflow-auto max-h-[calc(100vh-9rem)] scrollbar">
+      <main className="flex flex-col gap-y-1 overflow-auto max-h-[calc(100vh-9rem)] scrollbar text-sm">
         {filteredBranches && filteredBranches.length > 0
           ? filteredBranches.map(branch => (
             <Link

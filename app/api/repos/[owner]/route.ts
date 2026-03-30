@@ -1,11 +1,13 @@
 import { type NextRequest } from "next/server";
 import { createOctokitInstance } from "@/lib/utils/octokit";
-import { getAuth } from "@/lib/auth";
-import { getInstallations, getInstallationRepos } from "@/lib/githubApp";
-import { getUserToken } from "@/lib/token";
+import { getInstallations, getInstallationRepos } from "@/lib/github-app";
 import { db } from "@/db";
-import { and, eq } from "drizzle-orm";
+import { and, sql } from "drizzle-orm";
 import { collaboratorTable } from "@/db/schema";
+import { getGithubAccount } from "@/lib/github-account";
+import { hasGithubIdentity } from "@/lib/authz";
+import { toErrorResponse } from "@/lib/api-error";
+import { requireApiUserSession } from "@/lib/session-server";
 
 export const dynamic = "force-dynamic";
 
@@ -19,20 +21,23 @@ export const dynamic = "force-dynamic";
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { owner: string } }
+  context: { params: Promise<{ owner: string }> }
 ) {
   try {
-    const { user, session } = await getAuth();
-    if (!session) return new Response(null, { status: 401 });
+    const params = await context.params;
+    const sessionResult = await requireApiUserSession();
+    if ("response" in sessionResult) return sessionResult.response;
+    const user = sessionResult.user;
 
-    let repos: any[] = [];
+    let githubRepos: any[] = [];
+    let collaboratorRepos: any[] = [];
 
     const searchParams = request.nextUrl.searchParams;
     const type = searchParams.get("type");
 
-    if (user.githubId) {
-      const token = await getUserToken();
-      if (!token) throw new Error("Token not found");
+    const githubAccount = await getGithubAccount(user.id);
+    if (githubAccount?.accessToken && hasGithubIdentity(user)) {
+      const token = githubAccount.accessToken;
 
       const repositorySelection = searchParams.get("repository_selection");
 
@@ -40,9 +45,9 @@ export async function GET(
         // Only some repos are selected
         // TODO: investigate why it's slow
         const installations = await getInstallations(token, [params.owner]);
-        if (installations.length !== 1) throw new Error(`"${params.owner}" is not part of your GitHub App installations`);
-
-        repos =  await getInstallationRepos(token, installations[0].id);
+        if (installations.length === 1) {
+          githubRepos = await getInstallationRepos(token, installations[0].id);
+        }
       } else {
         // All repos are selected, we search for the repos based on parameters
         const keyword = searchParams.get("keyword");
@@ -55,24 +60,37 @@ export async function GET(
           order: "desc",
           per_page: 5
         });
-        repos = response.data.items;
+        githubRepos = response.data.items;
       }
 
-      repos = repos.filter(repo => repo.permissions.push).map(repo => ({
+      githubRepos = githubRepos.filter(repo => repo.permissions.push).map(repo => ({
         owner: repo.owner.login,
         repo: repo.name,
         private: repo.private,
         defaultBranch: repo.default_branch,
         updatedAt: repo.updated_at,
       }));
-    } else {
-      repos = await db.query.collaboratorTable.findMany({
-        where: and(
-          eq(collaboratorTable.email, user.email),
-          eq(collaboratorTable.owner, params.owner)
-        )
-      });
     }
+
+    collaboratorRepos = await db.query.collaboratorTable.findMany({
+      where: and(
+        sql`lower(${collaboratorTable.email}) = lower(${user.email})`,
+        sql`lower(${collaboratorTable.owner}) = lower(${params.owner})`
+      )
+    });
+
+    const reposByKey = new Map<string, any>();
+    for (const repo of githubRepos) {
+      reposByKey.set(`${repo.owner.toLowerCase()}::${repo.repo.toLowerCase()}`, repo);
+    }
+    for (const repo of collaboratorRepos) {
+      const key = `${repo.owner.toLowerCase()}::${repo.repo.toLowerCase()}`;
+      if (!reposByKey.has(key)) {
+        reposByKey.set(key, repo);
+      }
+    }
+
+    const repos = Array.from(reposByKey.values());
 
     return Response.json({
       status: "success",
@@ -80,9 +98,6 @@ export async function GET(
     });
   } catch (error: any) {
     console.error(error);
-    return Response.json({
-      status: "error",
-      message: error.message,
-    });
+    return toErrorResponse(error);
   }
 }

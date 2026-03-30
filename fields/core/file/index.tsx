@@ -2,9 +2,9 @@ import { z, ZodIssueCode } from "zod";
 import { ViewComponent } from "./view-component";
 import { EditComponent } from "./edit-component";
 import { Field } from "@/types/field";
-import { swapPrefix } from "@/lib/githubImage";
+import { swapPrefix } from "@/lib/github-image";
 import { getSchemaByName } from "@/lib/schema";
-import { getFileExtension, extensionCategories } from "@/lib/utils/file";
+import { getFileExtension, extensionCategories, normalizeMediaPath } from "@/lib/utils/file";
 
 const read = (value: any, field: Field, config: Record<string, any>): string | string[] | null => {
   if (!value) return null;
@@ -22,7 +22,8 @@ const read = (value: any, field: Field, config: Record<string, any>): string | s
     return value.map(v => read(v, field, config)) as string[];
   }
 
-  return swapPrefix(value, mediaConfig.output, mediaConfig.input, true);
+  const normalizedValue = normalizeMediaPath(String(value));
+  return swapPrefix(normalizedValue, mediaConfig.output, mediaConfig.input, true);
 };
 
 const write = (value: any, field: Field, config: Record<string, any>): string | string[] | null => {
@@ -41,7 +42,8 @@ const write = (value: any, field: Field, config: Record<string, any>): string | 
     return value.map(v => write(v, field, config)) as string[];
   }
 
-  return swapPrefix(value, mediaConfig.input, mediaConfig.output);
+  const normalizedValue = normalizeMediaPath(String(value));
+  return swapPrefix(normalizedValue, mediaConfig.input, mediaConfig.output);
 };
 
 const getAllowedExtensions = (field: Field, mediaConfig: any): string[] | undefined => {
@@ -78,6 +80,7 @@ const schema = (field: Field, configObject?: Record<string, any>) => {
   let zodSchema: z.ZodTypeAny;
 
   const isMultiple = !!field.options?.multiple;
+  const enforceUnique = isMultiple && field.options?.unique === true;
 
   zodSchema = isMultiple
     ? z.array(z.string()).optional().nullable()
@@ -104,6 +107,19 @@ const schema = (field: Field, configObject?: Record<string, any>) => {
 
     if (isMultiple && hasEmptyElementInArray) {
       ctx.addIssue({ code: ZodIssueCode.custom, message: "File path cannot be empty within the list." });
+    }
+
+    if (enforceUnique && Array.isArray(data)) {
+      const normalizedPaths = data
+        .filter((path): path is string => typeof path === "string" && path !== "")
+        .map((path) => normalizeMediaPath(path));
+      if (new Set(normalizedPaths).size !== normalizedPaths.length) {
+        ctx.addIssue({
+          code: ZodIssueCode.custom,
+          message: "File paths must be unique.",
+        });
+        return;
+      }
     }
 
     if (isEmpty) return;

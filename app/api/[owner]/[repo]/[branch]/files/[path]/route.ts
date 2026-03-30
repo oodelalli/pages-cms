@@ -6,10 +6,13 @@ import { stringify, parse } from "@/lib/serialization";
 import { deepMap, generateZodSchema, getSchemaByName, sanitizeObject } from "@/lib/schema";
 import { getConfig, updateConfig } from "@/lib/utils/config";
 import { getFileExtension, getFileName, normalizePath, serializedTypes, getParentPath } from "@/lib/utils/file";
-import { getAuth } from "@/lib/auth";
+import { assertGithubIdentity } from "@/lib/authz";
 import { getToken } from "@/lib/token";
-import { updateFileCache } from "@/lib/githubCache";
+import { updateFileCache } from "@/lib/github-cache";
+import { createHttpError, toErrorResponse } from "@/lib/api-error";
 import mergeWith from "lodash.mergewith";
+import { buildCommitTokens, resolveCommitMessage } from "@/lib/commit-message";
+import { requireApiUserSession } from "@/lib/session-server";
 
 /**
  * Create, update and delete individual files in a GitHub repository.
@@ -22,24 +25,36 @@ import mergeWith from "lodash.mergewith";
 
 export async function POST(
   request: Request,
-  { params }: { params: { owner: string, repo: string, branch: string, path: string } }
+  context: { params: Promise<{ owner: string, repo: string, branch: string, path: string }> }
 ) {
   try {
-    const { user, session } = await getAuth();
-    if (!session) return new Response(null, { status: 401 });
+    const params = await context.params;
+    const sessionResult = await requireApiUserSession();
+    if ("response" in sessionResult) return sessionResult.response;
+    const user = sessionResult.user;
 
-    const token = await getToken(user, params.owner, params.repo);
+    const { token, source } = await getToken(user, params.owner, params.repo, true);
     if (!token) throw new Error("Token not found");
+    const committer = source === "installation"
+      ? {
+          name: user.name?.trim() || user.email,
+          email: user.email,
+        }
+      : undefined;
 
     const normalizedPath = normalizePath(params.path);
 
-    const config = await getConfig(params.owner, params.repo, params.branch);
+    const config = await getConfig(params.owner, params.repo, params.branch, {
+      getToken: async () => token,
+    });
     if (!config && normalizedPath !== ".pages.yml") throw new Error(`Configuration not found for ${params.owner}/${params.repo}/${params.branch}.`);
 
     const data: any = await request.json();
+    const onConflict = data.onConflict === "error" ? "error" : "rename";
 
     let contentBase64;
     let schema;
+    let schemaCommitTemplates: Record<string, string> | undefined;
 
     switch (data.type) {
       case "content":
@@ -47,6 +62,7 @@ export async function POST(
 
         schema = getSchemaByName(config?.object, data.name);
         if (!schema) throw new Error(`Content schema not found for ${data.name}.`);
+        schemaCommitTemplates = schema?.commit?.templates;
 
         if (!normalizedPath.startsWith(schema.path)) throw new Error(`Invalid path "${params.path}" for ${data.type} "${data.name}".`);
 
@@ -106,7 +122,7 @@ export async function POST(
 
             let finalContentObject = JSON.parse(JSON.stringify(unwrappedContentObject));
 
-            if (config?.object?.settings?.content?.merge && data.sha) {
+            if (config?.object?.settings?.content?.merge && data.sha && !schema.list) {
               const octokit = createOctokitInstance(token);
               const response = await octokit.rest.repos.getContent({
                 owner: params.owner,
@@ -149,6 +165,7 @@ export async function POST(
 
         schema = getSchemaByName(config?.object, data.name, "media");
         if (!schema) throw new Error(`Media schema not found for ${data.name}.`);
+        schemaCommitTemplates = schema?.commit?.templates;
 
         if (!normalizedPath.startsWith(schema.input)) throw new Error(`Invalid path "${params.path}" for media "${data.name}".`);
 
@@ -165,6 +182,7 @@ export async function POST(
         }
         break;
       case "settings":
+        assertGithubIdentity(user, "Only GitHub users can manage settings.");
         if (normalizedPath !== ".pages.yml") throw new Error(`Invalid path "${params.path}" for settings.`);
 
         contentBase64 = Buffer.from(data.content.body ?? "").toString("base64");
@@ -173,7 +191,23 @@ export async function POST(
         throw new Error(`Invalid type "${data.type}".`);
     }
 
-    const response = await githubSaveFile(token, params.owner, params.repo, params.branch, normalizedPath, contentBase64, data.sha);
+    const response = await githubSaveFile(
+      token,
+      params.owner,
+      params.repo,
+      params.branch,
+      normalizedPath,
+      contentBase64,
+      data.sha,
+      {
+        configObject: config?.object,
+        templatesOverride: schemaCommitTemplates,
+        contentName: data.name,
+        user: user.email || user.name || String(user.id || ""),
+        onConflict,
+        committer,
+      }
+    );
 
     const savedPath = response?.data.content?.path;
 
@@ -233,10 +267,7 @@ export async function POST(
     });
   } catch (error: any) {
     console.error(error);
-    return Response.json({
-      status: "error",
-      message: error.message,
-    });
+    return toErrorResponse(error);
   }
 };
 
@@ -249,12 +280,34 @@ const githubSaveFile = async (
   path: string,
   contentBase64: string,
   sha?: string,
+  options?: {
+    configObject?: Record<string, any>;
+    templatesOverride?: Record<string, string>;
+    contentName?: string;
+    user?: string;
+    onConflict?: "rename" | "error";
+    committer?: { name: string; email: string };
+  },
 ) => {
   // We disable retries for 409 errors as it means the file has changed (conflict on SHA)
   const octokit = createOctokitInstance(token, { retry: { doNotRetry: [409] } });
 
-//   const commitMsgPrefix = branch === `main` ? `[skip ci]` : ``;
-  const commitMsgPrefix = `[skip ci]`;
+  const message = resolveCommitMessage({
+    configObject: options?.configObject,
+    templatesOverride: options?.templatesOverride,
+    action: sha ? "update" : "create",
+    tokens: buildCommitTokens({
+      action: sha ? "update" : "create",
+      owner,
+      repo,
+      branch,
+      path,
+      contentName: options?.contentName,
+      user: options?.user,
+      userName: options?.committer?.name,
+      userEmail: options?.committer?.email,
+    }),
+  });
 
   try {
     // First attempt: try with original path
@@ -262,10 +315,11 @@ const githubSaveFile = async (
       owner,
       repo,
       path,
-      message: sha ? `${commitMsgPrefix} Update ${path} (via Pages CMS)` : `Create ${path} (via Pages CMS)`,
+      message,
       content: contentBase64,
       branch,
       sha: sha || undefined,
+      committer: options?.committer,
     });
 
     if (response.data.content && response.data.commit) {
@@ -279,6 +333,10 @@ const githubSaveFile = async (
 
     // Only handle 422 errors for new files (no sha)
     if (error.status === 422 && !sha) {
+      if (options?.onConflict === "error") {
+        throw createHttpError(`File \"${path}\" already exists.`, 409);
+      }
+
       // Get directory contents to find next available name
       const parentDir = getParentPath(path);
       const { data } = await octokit.rest.repos.getContent({
@@ -292,8 +350,16 @@ const githubSaveFile = async (
         throw new Error('Expected directory listing');
       }
 
-      const [filename, extension] = path.split('/').pop()!.split('.');
-      const pattern = new RegExp(`^${filename}-(\\d+)\\.${extension}$`);
+      const basename = path.split('/').pop() || "";
+      const lastDotIndex = basename.lastIndexOf(".");
+      const filename = lastDotIndex > 0 ? basename.slice(0, lastDotIndex) : basename;
+      const extension = lastDotIndex > 0 ? basename.slice(lastDotIndex + 1) : "";
+      const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const escapedFilename = escapeRegExp(filename);
+      const escapedExtension = escapeRegExp(extension);
+      const pattern = extension
+        ? new RegExp(`^${escapedFilename}-(\\d+)\\.${escapedExtension}$`)
+        : new RegExp(`^${escapedFilename}-(\\d+)$`);
       const maxNumber = Math.max(0, ...data
         .map(file => {
           const match = file.name.match(pattern);
@@ -302,15 +368,35 @@ const githubSaveFile = async (
 
       // Try up to 3 times with incrementing numbers
       for (let i = 1; i <= 3; i++) {
-        const newPath = `${parentDir ? parentDir + '/' : ''}${filename}-${maxNumber + i}.${extension}`;
+        const candidateFilename = extension
+          ? `${filename}-${maxNumber + i}.${extension}`
+          : `${filename}-${maxNumber + i}`;
+        const newPath = `${parentDir ? parentDir + '/' : ''}${candidateFilename}`;
+        const fallbackMessage = resolveCommitMessage({
+          configObject: options?.configObject,
+          templatesOverride: options?.templatesOverride,
+          action: "create",
+          tokens: buildCommitTokens({
+            action: "create",
+            owner,
+            repo,
+            branch,
+            path: newPath,
+            contentName: options?.contentName,
+            user: options?.user,
+            userName: options?.committer?.name,
+            userEmail: options?.committer?.email,
+          }),
+        });
         try {
           const response = await octokit.rest.repos.createOrUpdateFileContents({
             owner,
             repo,
             path: newPath,
-            message: `${commitMsgPrefix} Create ${newPath} (via Pages CMS)`,
+            message: fallbackMessage,
             content: contentBase64,
             branch,
+            committer: options?.committer,
           });
 
           if (response.data.content && response.data.commit) {
@@ -328,14 +414,22 @@ const githubSaveFile = async (
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { owner: string, repo: string, branch: string, path: string } }
+  context: { params: Promise<{ owner: string, repo: string, branch: string, path: string }> }
 ) {
   try {
-    const { user, session } = await getAuth();
-    if (!session) return new Response(null, { status: 401 });
+    const params = await context.params;
+    const sessionResult = await requireApiUserSession();
+    if ("response" in sessionResult) return sessionResult.response;
+    const user = sessionResult.user;
 
-    const token = await getToken(user, params.owner, params.repo);
+    const { token, source } = await getToken(user, params.owner, params.repo, true);
     if (!token) throw new Error("Token not found");
+    const committer = source === "installation"
+      ? {
+          name: user.name?.trim() || user.email,
+          email: user.email,
+        }
+      : undefined;
 
     if (params.path === ".pages.yml") throw new Error(`Deleting the settings file isn't allowed.`);
 
@@ -348,11 +442,14 @@ export async function DELETE(
     if (!name && type === "content") throw new Error(`"name" is required.`);
     if (!sha) throw new Error(`"sha" is required.`);
 
-    const config = await getConfig(params.owner, params.repo, params.branch);
+    const config = await getConfig(params.owner, params.repo, params.branch, {
+      getToken: async () => token,
+    });
     if (!config) throw new Error(`Configuration not found for ${params.owner}/${params.repo}/${params.branch}.`);
 
     const normalizedPath = normalizePath(params.path);
     let schema;
+    let schemaCommitTemplates: Record<string, string> | undefined;
 
     switch (type) {
       case "content":
@@ -360,6 +457,7 @@ export async function DELETE(
 
         schema = getSchemaByName(config.object, name);
         if (!schema) throw new Error(`Content schema not found for ${name}.`);
+        schemaCommitTemplates = schema?.commit?.templates;
 
         if (!normalizedPath.startsWith(schema.path)) throw new Error(`Invalid path "${params.path}" for ${type} "${name}".`);
 
@@ -374,6 +472,7 @@ export async function DELETE(
 
         schema = getSchemaByName(config.object, name, "media");
         if (!schema) throw new Error(`Media schema not found for ${name}.`);
+        schemaCommitTemplates = schema?.commit?.templates;
 
         if (!normalizedPath.startsWith(schema.input)) throw new Error(`Invalid path "${params.path}" for media "${name}".`);
 
@@ -391,20 +490,36 @@ export async function DELETE(
       owner: params.owner,
       repo: params.repo,
       branch: params.branch,
-      path: params.path,
+      path: normalizedPath,
       sha: sha,
-      message: `${commitMsgPrefix} Delete ${params.path} (via Pages CMS)`,
+      message: resolveCommitMessage({
+        configObject: config.object,
+        templatesOverride: schemaCommitTemplates,
+        action: "delete",
+        tokens: buildCommitTokens({
+          action: "delete",
+          owner: params.owner,
+          repo: params.repo,
+          branch: params.branch,
+          path: normalizedPath,
+          contentName: name || undefined,
+          user: user.email || user.name || String(user.id || ""),
+          userName: committer?.name,
+          userEmail: committer?.email,
+        }),
+      }),
+      committer,
     });
 
     // Update cache after successful deletion
     await updateFileCache(
-      'collection',
+      type === "content" ? "collection" : "media",
       params.owner,
       params.repo,
       params.branch,
       {
         type: 'delete',
-        path: params.path
+        path: normalizedPath
       }
     );
 
@@ -419,9 +534,6 @@ export async function DELETE(
     });
   } catch (error: any) {
     console.error(error);
-    return Response.json({
-      status: "error",
-      message: error.message,
-    });
+    return toErrorResponse(error);
   }
 };

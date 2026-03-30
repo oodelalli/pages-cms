@@ -1,29 +1,34 @@
 "use client";
 
+import { use } from "react";
 import { useSearchParams } from "next/navigation";
-import { useConfig } from "@/contexts/config-context";
 import { MediaView} from "@/components/media/media-view";
+import { DocumentTitle, formatRepoBranchTitle } from "@/components/document-title";
+import { useConfig } from "@/contexts/config-context";
+import { getSchemaByName } from "@/lib/schema";
 
 export default function Page({
   params
 }: {
-  params: {
+  params: Promise<{
     name: string;
-  }
+  }>
 }) {
+  const resolvedParams = use(params);
+  const { config } = useConfig();
+  if (!config) throw new Error("Configuration not found.");
   const searchParams = useSearchParams();
   const path = searchParams.get("path") || "";
-
-  const { config } = useConfig();
-  if (!config) throw new Error(`Configuration not found.`);
+  const schema = getSchemaByName(config.object, decodeURIComponent(resolvedParams.name), "media");
+  const displayName = schema?.label || schema?.name || decodeURIComponent(resolvedParams.name);
   
   return (
     <div className="max-w-screen-xl mx-auto flex-1 flex flex-col h-full">
-      <header className="flex items-center mb-6">
-        <h1 className="font-semibold text-lg md:text-2xl">Media</h1>
-      </header>
+      <DocumentTitle
+        title={formatRepoBranchTitle(displayName, config.owner, config.repo, config.branch)}
+      />
       <div className="flex flex-col relative flex-1">
-        <MediaView initialPath={path} media={params.name} />
+        <MediaView initialPath={path} media={resolvedParams.name} />
       </div>
     </div>
   );

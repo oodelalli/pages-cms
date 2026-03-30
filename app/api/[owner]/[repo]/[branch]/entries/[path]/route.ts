@@ -5,8 +5,10 @@ import { deepMap, getSchemaByName } from "@/lib/schema";
 import { parse } from "@/lib/serialization";
 import { getConfig } from "@/lib/utils/config";
 import { getFileExtension, normalizePath } from "@/lib/utils/file";
-import { getAuth } from "@/lib/auth";
+import { assertGithubIdentity } from "@/lib/authz";
 import { getToken } from "@/lib/token";
+import { createHttpError, toErrorResponse } from "@/lib/api-error";
+import { requireApiUserSession } from "@/lib/session-server";
 
 /**
  * Fetches and parses individual file contents from GitHub repositories
@@ -20,51 +22,87 @@ import { getToken } from "@/lib/token";
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { owner: string, repo: string, branch: string, path: string } }
+  context: { params: Promise<{ owner: string, repo: string, branch: string, path: string }> }
 ) {
   try {
-    const { user, session } = await getAuth();
-    if (!session) return new Response(null, { status: 401 });
+    const params = await context.params;
+    const sessionResult = await requireApiUserSession();
+    if ("response" in sessionResult) return sessionResult.response;
+    const user = sessionResult.user;
 
-    const token = await getToken(user, params.owner, params.repo);
-    if (!token) throw new Error("Token not found");
+    const { token } = await getToken(user, params.owner, params.repo);
+    if (!token) throw createHttpError("Token not found", 401);
 
     const searchParams = request.nextUrl.searchParams;
     const name = searchParams.get("name");
+    const metaOnly =
+      searchParams.get("meta") === "true" ||
+      searchParams.get("meta") === "1";
     
     const normalizedPath = normalizePath(params.path);
+    if (normalizedPath === ".pages.yml") {
+      assertGithubIdentity(user, "Only GitHub users can access settings.");
+    }
 
-    if (!name && normalizedPath !== ".pages.yml") throw new Error("If no content entry name is provided, the path must be \".pages.yml\".");
+    if (!name && normalizedPath !== ".pages.yml") {
+      throw createHttpError("If no content entry name is provided, the path must be \".pages.yml\".", 400);
+    }
+
+    if (!name && normalizedPath === ".pages.yml" && metaOnly) {
+      const cachedConfig = await getConfig(params.owner, params.repo, params.branch, {
+        getToken: async () => token,
+      });
+      return Response.json({
+        status: "success",
+        data: {
+          sha: cachedConfig?.sha ?? null,
+          version: cachedConfig?.version ?? null,
+          lastCheckedAt: cachedConfig?.lastCheckedAt ?? null,
+        },
+      });
+    }
 
     let config;
     let schema;
 
     if (name) {
-      config = await getConfig(params.owner, params.repo, params.branch);
-      if (!config) throw new Error(`Configuration not found for ${params.owner}/${params.repo}/${params.branch}.`);
+      config = await getConfig(params.owner, params.repo, params.branch, {
+        getToken: async () => token,
+      });
+      if (!config) throw createHttpError(`Configuration not found for ${params.owner}/${params.repo}/${params.branch}.`, 404);
 
       schema = getSchemaByName(config.object, name);
-      if (!schema) throw new Error(`Schema not found for ${name}.`);
+      if (!schema) throw createHttpError(`Schema not found for ${name}.`, 404);
 
-      if (!normalizedPath.startsWith(schema.path)) throw new Error(`Invalid path "${params.path}" for ${schema.type} "${name}".`);
+      if (!normalizedPath.startsWith(schema.path)) throw createHttpError(`Invalid path "${params.path}" for ${schema.type} "${name}".`, 400);
 
-      if (getFileExtension(normalizedPath) !== schema.extension) throw new Error(`Invalid extension "${getFileExtension(normalizedPath)}" for ${schema.type} "${name}".`);
+      if (getFileExtension(normalizedPath) !== schema.extension) {
+        throw createHttpError(`Invalid extension "${getFileExtension(normalizedPath)}" for ${schema.type} "${name}".`, 400);
+      }
     } else {
       config = {};
     }
     
     const octokit = createOctokitInstance(token);
-    const response = await octokit.rest.repos.getContent({
-      owner: params.owner,
-      repo: params.repo,
-      path: normalizedPath,
-      ref: params.branch
-    });
+    let response;
+    try {
+      response = await octokit.rest.repos.getContent({
+        owner: params.owner,
+        repo: params.repo,
+        path: normalizedPath,
+        ref: params.branch
+      });
+    } catch (error: any) {
+      if (error?.status === 404) {
+        throw createHttpError("Not found", 404);
+      }
+      throw error;
+    }
     
     if (Array.isArray(response.data)) {
-      throw new Error("Expected a file but found a directory");
+      throw createHttpError("Expected a file but found a directory", 400);
     } else if (response.data.type !== "file") {
-      throw new Error("Invalid response type");
+      throw createHttpError("Invalid response type", 500);
     }
 
     const content = Buffer.from(response.data.content, "base64").toString();
@@ -83,10 +121,7 @@ export async function GET(
     });
   } catch (error: any) {
     console.error(error);
-    return Response.json({
-      status: "error",
-      message: error.status === 404 ? "Not found" : error.message,
-    });
+    return toErrorResponse(error);
   }
 }
 
@@ -122,7 +157,6 @@ const parseContent = (
         contentObject,
         entryFields,
         (value, field) => {
-          if (field.hidden) return;
           const type = field.type;
           if (typeof type === 'string' && readFns[type]) {
             return readFns[type](value, field, config);
@@ -132,7 +166,7 @@ const parseContent = (
       );
       if (schema.list) contentObject = contentObject.listWrapper;
     } catch (error: any) {
-      throw new Error(`Error parsing frontmatter: ${error.message}`);
+      throw createHttpError(`Error parsing frontmatter: ${error.message}`, 400);
     }
   } else {
     contentObject = { body: content };

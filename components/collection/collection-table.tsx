@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   flexRender,
   getCoreRowModel,
@@ -15,6 +15,15 @@ import {
 } from "@tanstack/react-table"
 import { Button } from "@/components/ui/button";
 import {
+  Pagination,
+  PaginationContent,
+  PaginationEllipsis,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
+import {
   Table,
   TableBody,
   TableCell,
@@ -24,7 +33,7 @@ import {
 } from "@/components/ui/table";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
-import { ArrowUp, ArrowDown, Ban, ChevronLeft, ChevronRight, Loader2, CircleMinus, CirclePlus, Folder, FolderOpen } from "lucide-react";
+import { ArrowUp, ArrowDown, Loader, CircleMinus, CirclePlus, Folder, FolderOpen } from "lucide-react";
 
 declare module '@tanstack/react-table' {
   interface ColumnMeta<TData extends RowData, TValue> {
@@ -39,7 +48,7 @@ export type TableData = {
   content?: string;
   object?: Record<string, any>;
   type: "file" | "dir";
-  node?: boolean;
+  isNode?: boolean;
   parentPath?: string;
   subRows?: TableData[];
   fields?: Record<string, any>;
@@ -81,11 +90,17 @@ export function CollectionTable<TData extends TableData>({
   const [expanded, setExpanded] = useState<ExpandedState>({});
   
   const [loadingRows, setLoadingRows] = useState<Record<string, boolean>>({});
+  const loadingPathSetRef = useRef<Set<string>>(new Set());
 
   const handleRowExpansion = useCallback(async (row: Row<TData>) => {
     const needsLoading = row.getCanExpand() && !row.getIsExpanded() && row.original.subRows === undefined;
+    const loadPath = row.original.isNode ? row.original.parentPath : row.original.path;
 
     if (needsLoading) {
+      if (!loadPath) return;
+      if (loadingPathSetRef.current.has(loadPath)) return;
+
+      loadingPathSetRef.current.add(loadPath);
       setLoadingRows(prev => ({ ...prev, [row.id]: true }));
       try {
         await onExpand(row.original);
@@ -98,6 +113,7 @@ export function CollectionTable<TData extends TableData>({
         });
         return;
       } finally {
+        loadingPathSetRef.current.delete(loadPath);
         setLoadingRows(prev => {
           const newState = { ...prev };
           delete newState[row.id];
@@ -127,6 +143,31 @@ export function CollectionTable<TData extends TableData>({
     onExpandedChange: setExpanded,
   });
 
+  const currentPage = table.getState().pagination.pageIndex;
+  const pageCount = table.getPageCount();
+
+  const paginationItems = (() => {
+    if (pageCount <= 7) {
+      return Array.from({ length: pageCount }, (_, i) => i);
+    }
+
+    const pages = new Set<number>([0, pageCount - 1, currentPage]);
+    if (currentPage - 1 >= 0) pages.add(currentPage - 1);
+    if (currentPage + 1 < pageCount) pages.add(currentPage + 1);
+
+    const ordered = Array.from(pages).sort((a, b) => a - b);
+    const items: Array<number | "ellipsis"> = [];
+
+    for (let i = 0; i < ordered.length; i += 1) {
+      if (i > 0 && ordered[i] - ordered[i - 1] > 1) {
+        items.push("ellipsis");
+      }
+      items.push(ordered[i]);
+    }
+
+    return items;
+  })();
+
   useEffect(() => {
     if (!isTree) return;
     
@@ -143,16 +184,9 @@ export function CollectionTable<TData extends TableData>({
     });
   }, [isTree, path, handleRowExpansion, table, data]);
 
-  useEffect(() => {
-    table.setOptions(prev => ({
-      ...prev,
-      data
-    }));
-  }, [data, table]);
-
   return (
     <div className="space-y-2">
-      <Table className="border-separate border-spacing-0 text-base"> 
+      <Table className="border-separate border-spacing-0 text-sm">
         <TableHeader>
           {table.getHeaderGroups().map((headerGroup) => (
             <TableRow key={headerGroup.id} className="sticky -top-4 md:-top-6 z-20 bg-background hover:bg-background">
@@ -161,7 +195,7 @@ export function CollectionTable<TData extends TableData>({
                   <TableHead
                     key={header.id}
                     className={cn(
-                      "text-xs px-3 h-12 first:pl-0 last:pr-0 border-b hover:bg-muted/50 cursor-pointer select-none last:cursor-default last:hover:bg-background truncate",
+                      "p-2 h-10 border-b hover:bg-muted/50 cursor-pointer select-none last:cursor-default last:hover:bg-background truncate",
                       header.column.columnDef.meta?.className
                     )}
                     onClick={header.column.getToggleSortingHandler()}
@@ -202,7 +236,7 @@ export function CollectionTable<TData extends TableData>({
                     ? <>
                       <TableCell
                         colSpan={columns.length - 1}
-                        className="px-3 first:pl-0 last:pr-0 border-b py-0 h-14"
+                        className="p-2 border-b py-0 h-12"
                         style={{
                           paddingLeft: row.depth > 0
                             ? `${row.depth * 2}rem`
@@ -215,7 +249,7 @@ export function CollectionTable<TData extends TableData>({
                               onClick={() => handleRowExpansion(row as Row<TData>)}
                             >
                               {loadingRows[row.id]
-                                ? <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                                ? <Loader className="h-4 w-4 animate-spin text-muted-foreground" />
                                 : row.getIsExpanded()
                                   ? <FolderOpen className="h-4 w-4" />
                                   : <Folder className="h-4 w-4" />
@@ -231,7 +265,7 @@ export function CollectionTable<TData extends TableData>({
                             </Link>
                         }
                       </TableCell>
-                      <TableCell className="px-3 first:pl-0 last:pr-0 border-b py-0 h-14">
+                      <TableCell className="p-2 border-b py-0 h-12">
                         {
                           (() => {
                             const lastCell = row.getVisibleCells()[row.getVisibleCells().length - 1];
@@ -244,7 +278,7 @@ export function CollectionTable<TData extends TableData>({
                       <TableCell
                         key={cell.id}
                         className={cn(
-                          "px-3 first:pl-0 last:pr-0 border-b py-0 h-14",
+                          "p-2 border-b py-0 h-12",
                           cell.column.columnDef.meta?.className,
                         )}
                         style={{
@@ -259,14 +293,14 @@ export function CollectionTable<TData extends TableData>({
                           {isTree && row.getCanExpand() && cell.column.id === primaryField && (
                             loadingRows[row.id]
                               ? <Button variant="ghost" size="icon-sm" className="h-6 w-6 rounded-full" disabled>
-                                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                                  <Loader className="h-4 w-4 animate-spin text-muted-foreground" />
                                 </Button>
                               : <Button
                                   variant="ghost"
                                   size="icon-sm"
                                   className="h-6 w-6 rounded-full"
                                   onClick={() => handleRowExpansion(row as Row<TData>)}
-                                  disabled={row.getIsExpanded() && row.subRows.length === 0}
+                                  disabled={row.getIsExpanded() && Array.isArray(row.original.subRows) && row.original.subRows.length === 0}
                                 >
                                   {row.getIsExpanded() ? <CircleMinus className="text-muted-foreground hover:text-foreground h-4 w-4" /> : <CirclePlus className="text-muted-foreground hover:text-foreground h-4 w-4" />}
                                   <span className="sr-only">{row.getIsExpanded() ? 'Collapse row' : 'Expand row'}</span>
@@ -282,32 +316,60 @@ export function CollectionTable<TData extends TableData>({
           ) : (
             <TableRow className="hover:bg-transparent">
               <TableCell colSpan={columns.length} className="text-center text-muted-foreground text-sm p-6">
-                <div className="inline-flex items-center justify-center">
-                  <Ban className="h-4 w-4 mr-2"/>
-                  No entries
-                </div>
+                <span>No entries</span>
               </TableCell>
             </TableRow>
           )}
         </TableBody>
       </Table>
-      { (table.getCanPreviousPage() || table.getCanNextPage()) && 
-        <footer className="flex gap-x-2 items-center">
-          <div className="text-muted-foreground text-sm mr-auto">
-            {`Page ${table.getState().pagination.pageIndex + 1} of ${table.getPageCount()}`}
-          </div>
-          <div className="flex">
-            <Button size="sm" variant="ghost" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()}>
-              <ChevronLeft className="h-4 w-4 mr-1"/>
-              Previous
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => table.nextPage()} disabled={!table.getCanNextPage()}>
-              Next
-              <ChevronRight className="h-4 w-4 ml-1"/>
-            </Button>
-          </div>
+      {pageCount > 1 && (
+        <footer className="flex items-center justify-end">
+          <Pagination className="mx-0 w-auto justify-end">
+            <PaginationContent>
+              <PaginationItem>
+                <PaginationPrevious
+                  href="#"
+                  iconOnly
+                  onClick={(event) => {
+                    event.preventDefault();
+                    if (table.getCanPreviousPage()) table.previousPage();
+                  }}
+                  className={!table.getCanPreviousPage() ? "pointer-events-none opacity-50" : undefined}
+                />
+              </PaginationItem>
+              {paginationItems.map((item, index) => (
+                <PaginationItem key={`${item}-${index}`}>
+                  {item === "ellipsis" ? (
+                    <PaginationEllipsis />
+                  ) : (
+                    <PaginationLink
+                      href="#"
+                      isActive={item === currentPage}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        table.setPageIndex(item);
+                      }}
+                    >
+                      {item + 1}
+                    </PaginationLink>
+                  )}
+                </PaginationItem>
+              ))}
+              <PaginationItem>
+                <PaginationNext
+                  href="#"
+                  iconOnly
+                  onClick={(event) => {
+                    event.preventDefault();
+                    if (table.getCanNextPage()) table.nextPage();
+                  }}
+                  className={!table.getCanNextPage() ? "pointer-events-none opacity-50" : undefined}
+                />
+              </PaginationItem>
+            </PaginationContent>
+          </Pagination>
         </footer>
-      }
+      )}
     </div>
   )
 }

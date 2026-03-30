@@ -3,7 +3,6 @@
 import { forwardRef } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { v4 as uuidv4 } from 'uuid';
 import { RefreshCcw } from "lucide-react";
 import {
   Tooltip,
@@ -13,19 +12,20 @@ import {
 } from "@/components/ui/tooltip";
 
 const EditComponent = forwardRef((props: any, ref: React.Ref<HTMLInputElement>) => {
-  const { value, field, onChange } = props;
+  const { field, onChange, ...restProps } = props;
+  const isInputReadonly = field?.readonly || !field?.options?.editable;
 
   const generateNewUUID = () => {
-    onChange(uuidv4());
+    onChange(crypto.randomUUID());
   };
 
   return (
     <div className="flex gap-2">
       <Input 
-        {...props} 
+        {...restProps} 
         ref={ref} 
         className="text-base" 
-        readOnly={!field?.options?.editable}
+        readOnly={isInputReadonly}
       />
       {field?.options?.generate !== false && (
         <TooltipProvider>
@@ -37,6 +37,7 @@ const EditComponent = forwardRef((props: any, ref: React.Ref<HTMLInputElement>) 
                 size="icon"
                 onClick={generateNewUUID}
                 className="shrink-0"
+                disabled={field?.readonly}
               >
                 <RefreshCcw className="w-4 h-4" />
               </Button>

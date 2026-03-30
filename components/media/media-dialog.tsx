@@ -1,12 +1,14 @@
 "use client";
 
-import { forwardRef, useCallback, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useCallback, useImperativeHandle, useState } from "react";
+import { flushSync } from "react-dom";
 import { useConfig } from "@/contexts/config-context";
 import { MediaView } from "@/components/media/media-view";
 import { Button } from "@/components/ui/button";
+import type { FileSaveData } from "@/types/api";
+import { Loader } from "lucide-react";
 import {
   Dialog,
-  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -23,20 +25,20 @@ export interface MediaDialogHandle {
 
 const MediaDialog = forwardRef(({
   media,
-  selected,
   onSubmit,
   maxSelected,
   initialPath,
   children,
-  extensions
+  extensions,
+  onOpenChange
 }: {
   media?: string,
   onSubmit: (images: string[]) => void,
-  selected?: string[],
   maxSelected?: number,
   initialPath?: string,
   children?: React.ReactNode,
-  extensions?: string[]
+  extensions?: string[],
+  onOpenChange?: (open: boolean) => void
 }, ref) => {
   const { config } = useConfig();
   if (!config) throw new Error(`Configuration not found.`);
@@ -45,32 +47,65 @@ const MediaDialog = forwardRef(({
     ? getSchemaByName(config.object, media, "media")
     : config.object.media[0];
 
-  const selectedImagesRef = useRef(selected || []);
-  const [selectedImages, setSelectedImages] = useState(selected || []);
+  const [selectedImages, setSelectedImages] = useState<string[]>([]);
   const [open, setOpen] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSelect = useCallback((newSelected: string[]) => {
-    selectedImagesRef.current = newSelected;
     setSelectedImages(newSelected);
   }, []);
 
-  const handleSubmit = useCallback(() => {
-    onSubmit(selectedImagesRef.current);
-  }, [onSubmit]);
+  const handleSubmit = useCallback(async () => {
+    if (selectedImages.length === 0 || isSubmitting) return;
+    flushSync(() => {
+      setIsSubmitting(true);
+    });
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve());
+    });
+    try {
+      await Promise.resolve(onSubmit(selectedImages));
+      setOpen(false);
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [isSubmitting, onSubmit, selectedImages]);
 
-  const handleUpload = useCallback((entry: any) => {
-    const newSelected = [...selectedImagesRef.current, entry.path];
-    selectedImagesRef.current = newSelected;
-    setSelectedImages(newSelected);
-  }, []);
+  const handleUpload = useCallback((entry: FileSaveData) => {
+    const path = entry.path;
+    if (!path) return;
+    setSelectedImages((prev) => {
+      const next = [...prev, path];
+      if (maxSelected == null) return next;
+      if (maxSelected <= 0) return [];
+      if (next.length <= maxSelected) return next;
+      return next.slice(next.length - maxSelected);
+    });
+  }, [maxSelected]);
 
   useImperativeHandle(ref, () => ({
-    open: () => setOpen(true),
-    close: () => setOpen(false),
+    open: () => {
+      setSelectedImages([]);
+      setIsSubmitting(false);
+      setOpen(true);
+    },
+    close: () => {
+      setSelectedImages([]);
+      setIsSubmitting(false);
+      setOpen(false);
+    },
   }));
 
+  const handleOpenChange = useCallback((nextOpen: boolean) => {
+    if (!nextOpen && isSubmitting) return;
+    setOpen(nextOpen);
+    setSelectedImages([]);
+    setIsSubmitting(false);
+    onOpenChange?.(nextOpen);
+  }, [isSubmitting, onOpenChange]);
+
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       {children && 
         <DialogTrigger asChild>
           {children}
@@ -90,18 +125,18 @@ const MediaDialog = forwardRef(({
           onUpload={handleUpload}
           maxSelected={maxSelected} 
           initialPath={initialPath || ""}
+          usePageHeader={false}
         />
         {configMedia.input &&
           <DialogFooter>
-            <DialogClose asChild>
-              <Button 
-                type="submit" 
-                onClick={handleSubmit} 
-                disabled={selectedImages.length === 0}
-              >
-                Select
-              </Button>
-            </DialogClose>
+            <Button 
+              type="button" 
+              onClick={() => void handleSubmit()} 
+              disabled={selectedImages.length === 0 || isSubmitting}
+            >
+              Select
+              {isSubmitting ? <Loader className="animate-spin" /> : null}
+            </Button>
           </DialogFooter>
         }
       </DialogContent>

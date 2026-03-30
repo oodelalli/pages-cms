@@ -1,9 +1,8 @@
 "use client";
-
-import { useMemo } from "react";
 import { parse, format, isValid } from "date-fns";
 import { Field } from "@/types/field";
 import { CalendarIcon } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 
 const ViewComponent = ({
   value,
@@ -20,27 +19,25 @@ const ViewComponent = ({
   const inputFormat = field.options?.time ? "yyyy-MM-dd'T'HH:mm" : "yyyy-MM-dd";
   const outputFormat = field.options?.time ? "MMM d, yyyy - HH:mm" : "MMM d, yyyy";
 
-  const formatDate = useMemo(() => (date: string) => {
+  const formatDate = (date: string) => {
     const parsedDate = parse(date, inputFormat, new Date());
     if (!isValid(parsedDate)) {
       console.warn(`Date for field '${field.name}' is saved in the wrong format or invalid: ${date}.`);
       return null;
     }
     return format(parsedDate, outputFormat);
-  }, [inputFormat, outputFormat, field.name]);
+  };
   
   return (
     <span className="flex items-center gap-x-1.5">
-      <span className="inline-flex rounded-full border px-2 py-0.5 text-sm font-medium items-center gap-x-1.5">
-        <CalendarIcon className="w-3 h-3 shrink-0"/>
-        <span className="text-ellipsis overflow-hidden whitespace-nowrap">
-          {formatDate(firstValue)}
-        </span>
-      </span>
+      <Badge variant="secondary">
+        <CalendarIcon/>
+        {formatDate(firstValue)}
+      </Badge>
       {extraValuesCount > 0 && (
-        <span className="text-muted-foreground text-xs">
+        <Badge variant="secondary" className="px-1">
           +{extraValuesCount}
-        </span>
+        </Badge>
       )}
     </span>
   );

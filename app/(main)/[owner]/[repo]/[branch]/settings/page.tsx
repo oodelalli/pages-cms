@@ -1,16 +1,10 @@
-"use client";
+import { redirect } from "next/navigation";
 
-import { EntryEditor } from "@/components/entry/entry-editor";
-import { useConfig } from "@/contexts/config-context";
-
-export default function Page() {
-  const { setConfig } = useConfig();
-
-  const handleSave = async (data: Record<string, any>) => {
-    setConfig(data.config);
-  };
-  
-  return (
-    <EntryEditor path=".pages.yml" onSave={handleSave} title="Settings"/>
-  );
+export default async function Page(
+  props: Readonly<{
+    params: Promise<{ owner: string; repo: string; branch: string }>;
+  }>,
+) {
+  const params = await props.params;
+  redirect(`/${params.owner}/${params.repo}/${encodeURIComponent(params.branch)}/configuration`);
 }

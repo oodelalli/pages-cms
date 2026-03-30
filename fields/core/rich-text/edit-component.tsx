@@ -1,504 +1,804 @@
 "use client";
 
-import { forwardRef, useCallback, useRef, useState, useMemo } from "react";
-import { BubbleMenu, EditorContent, useEditor } from "@tiptap/react";
-import StarterKit from "@tiptap/starter-kit";
-import Image from "@tiptap/extension-image";
-import Link from "@tiptap/extension-link";
-import Placeholder from "@tiptap/extension-placeholder";
-import Table from "@tiptap/extension-table";
-import TableCell from "@tiptap/extension-table-cell";
-import TableHeader from "@tiptap/extension-table-header";
-import TableRow from "@tiptap/extension-table-row";
-import TextAlign from "@tiptap/extension-text-align";
-import Underline from "@tiptap/extension-underline";
-import { useConfig } from "@/contexts/config-context";
-import { useRepo } from "@/contexts/repo-context";
-import { getRawUrl, relativeToRawUrls } from "@/lib/githubImage";
-import { MediaDialog, MediaDialogHandle } from "@/components/media/media-dialog";
-import "./edit-component.css";
-import Commands from './slash-command/commands';
-import suggestion from './slash-command/suggestion';
-import { Button } from "@/components/ui/button";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
+  forwardRef,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useFormContext } from "react-hook-form";
+import { createPortal } from "react-dom";
+import { Editor, type ImagePickerContext } from "@/components/ui/editor";
+import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import {
-  AlignCenter,
-  AlignJustify,
-  AlignLeft,
-  AlignRight,
-  Bold,
-  ChevronsUpDown,
-  Code,
-  Heading1,
-  Heading2,
-  Heading3,
-  Italic,
-  Link2,
-  List,
-  ListOrdered,
-  Pilcrow,
-  Quote,
-  RemoveFormatting,
-  Strikethrough,
-  Table as TableIcon,
-  Trash2,
-  Underline as UnderlineIcon
-} from "lucide-react";
-import { toast } from "sonner";
+  MediaDialog,
+  type MediaDialogHandle,
+} from "@/components/media/media-dialog";
+import { useConfig } from "@/contexts/config-context";
+import { useRepo } from "@/contexts/repo-context";
 import { getSchemaByName } from "@/lib/schema";
-import { extensionCategories, normalizePath } from "@/lib/utils/file";
+import {
+  getRawUrl,
+  getRelativeUrl,
+  htmlSwapPrefix,
+  rawToRelativeUrls,
+  relativeToRawUrls,
+  swapPrefix,
+} from "@/lib/github-image";
+import {
+  decodePathSafely,
+  extensionCategories,
+  generateRandomUploadName,
+  getFileExtension,
+  joinPathSegments,
+  normalizeMediaPath,
+  normalizePath,
+} from "@/lib/utils/file";
+import type { ApiResponse, FileSaveData } from "@/types/api";
+import type { Field } from "@/types/field";
+import "./edit-component.css";
 
-const EditComponent = forwardRef((props: any, ref) => {
-  const { config } = useConfig();
-  const { isPrivate } = useRepo();
+type MediaSchema = {
+  name: string;
+  input: string;
+  output: string;
+  extensions?: string[];
+  rename?: boolean;
+};
 
-  const { value, field, onChange } = props;
+type FieldOptions = {
+  format?: "html" | "markdown";
+  switcher?: boolean;
+  media?: false | string;
+  path?: string;
+  extensions?: string[];
+  categories?: string[];
+  rename?: boolean;
+};
 
-  const mediaConfig = useMemo(() => {
-    return (config?.object?.media?.length && field.options?.media !== false)
-      ? field.options?.media && typeof field.options.media === 'string'
-        ? getSchemaByName(config.object, field.options.media, "media")
-        : config.object.media[0]
-      : undefined;
-  }, [field.options?.media, config?.object]);
+type EditProps = {
+  name?: string;
+  value?: string;
+  field?: Field & {
+    options?: FieldOptions;
+  };
+  labelSlotId?: string;
+  registerBeforeSubmitHook?: (
+    key: string,
+    hook: () => void | Promise<void>,
+  ) => () => void;
+  onChangeRegistered?: () => void;
+  onChange: (value: string) => void;
+};
 
-  const allowedExtensions = useMemo(() => {
-    if (!mediaConfig) return [];
+const isExternalUrl = (value: string) =>
+  value.startsWith("http://") ||
+  value.startsWith("https://") ||
+  value.startsWith("//");
 
-    let extensions = extensionCategories['image'];
+const isDataUrl = (value: string) => value.startsWith("data:");
+const isAbsolutePath = (value: string) => value.startsWith("/");
 
-    const fieldExtensions = field.options?.extensions 
-      ? field.options.extensions
-      : field.options?.categories
-        ? field.options.categories.flatMap((category: string) => extensionCategories[category])
-        : [];
-
-    if (fieldExtensions.length) {
-      extensions = extensions.filter(ext => fieldExtensions.includes(ext));
+const parseMarkdownTarget = (
+  target: string,
+): { url: string; rest: string; wrapped: boolean } => {
+  const trimmed = target.trim();
+  if (trimmed.startsWith("<")) {
+    const closingIndex = trimmed.indexOf(">");
+    if (closingIndex > 0) {
+      return {
+        url: trimmed.slice(1, closingIndex),
+        rest: trimmed.slice(closingIndex + 1),
+        wrapped: true,
+      };
     }
+  }
 
-    if (mediaConfig.extensions) {
-      extensions = extensions.filter(ext => mediaConfig.extensions.includes(ext));
-    }
+  const firstWhitespace = trimmed.search(/\s/);
+  if (firstWhitespace < 0) return { url: trimmed, rest: "", wrapped: false };
 
-    return extensions;
-  }, [field.options?.extensions, field.options?.categories, mediaConfig]);
+  // Markdown allows optional image/link titles after the destination, but
+  // only when the tail starts with a title delimiter. Otherwise whitespace
+  // belongs to the URL (e.g. filenames with spaces).
+  const restCandidate = trimmed.slice(firstWhitespace);
+  const restTrimmed = restCandidate.trimStart();
+  const isTitleTail =
+    restTrimmed.startsWith("\"") ||
+    restTrimmed.startsWith("'") ||
+    restTrimmed.startsWith("(");
+  if (!isTitleTail) {
+    return { url: trimmed, rest: "", wrapped: false };
+  }
 
-  const mediaDialogRef = mediaConfig
-    ? useRef<MediaDialogHandle>(null)
-    : undefined;
+  return {
+    url: trimmed.slice(0, firstWhitespace),
+    rest: restCandidate,
+    wrapped: false,
+  };
+};
 
-  const bubbleMenuRef = useRef<HTMLDivElement | null>(null);
+const formatMarkdownTarget = (url: string, rest: string, wrapped: boolean) => {
+  const mustWrap = wrapped || (/\s/.test(url) && rest.trim().length === 0);
+  return mustWrap ? `<${url}>${rest}` : `${url}${rest}`;
+};
 
-  const [isContentReady, setContentReady] = useState(false);
+const rewriteMarkdownImagesSync = (
+  markdown: string,
+  transformUrl: (url: string) => string,
+) => {
+  const imagePattern = /(!\[[^\]]*]\()([^)\n]*)(\))/g;
+  return markdown.replace(
+    imagePattern,
+    (_full, prefix: string, target: string, suffix: string) => {
+      const parsed = parseMarkdownTarget(target);
+      const nextUrl = transformUrl(parsed.url);
+      const nextTarget = formatMarkdownTarget(
+        nextUrl,
+        parsed.rest,
+        parsed.wrapped,
+      );
+      return `${prefix}${nextTarget}${suffix}`;
+    },
+  );
+};
 
-  const [linkUrl, setLinkUrl] = useState("");
-  const [imageAlt, setImageAlt] = useState("");
+const rewriteMarkdownImagesAsync = async (
+  markdown: string,
+  transformUrl: (url: string) => Promise<string>,
+) => {
+  const imagePattern = /(!\[[^\]]*]\()([^)\n]*)(\))/g;
+  const matches = Array.from(markdown.matchAll(imagePattern));
+  if (!matches.length) return markdown;
 
-  const openMediaDialog = mediaConfig?.input
-    ? () => { if (mediaDialogRef?.current) mediaDialogRef.current.open() }
-    : undefined;
+  let rebuilt = "";
+  let cursor = 0;
 
-  const rootPath = useMemo(() => {
-    if (!mediaConfig) return undefined;
-    
-    if (!field.options?.path) return mediaConfig?.input;
+  for (const match of matches) {
+    const full = match[0];
+    const prefix = match[1] ?? "";
+    const target = match[2] ?? "";
+    const suffix = match[3] ?? "";
+    const start = match.index ?? 0;
+    const end = start + full.length;
+    const parsed = parseMarkdownTarget(target);
+    const nextUrl = await transformUrl(parsed.url);
+    const nextTarget = formatMarkdownTarget(
+      nextUrl,
+      parsed.rest,
+      parsed.wrapped,
+    );
 
-    const normalizedPath = normalizePath(field.options.path);
-    const normalizedMediaPath = normalizePath(mediaConfig?.input);
+    rebuilt += markdown.slice(cursor, start);
+    rebuilt += `${prefix}${nextTarget}${suffix}`;
+    cursor = end;
+  }
 
-    if (!normalizedPath.startsWith(normalizedMediaPath)) {
-      console.warn(`"${field.options.path}" is not within media root "${mediaConfig?.input}". Defaulting to media root.`);
-      return mediaConfig?.input;
-    }
+  rebuilt += markdown.slice(cursor);
+  return rebuilt;
+};
 
-    return normalizedPath;
-  }, [field.options?.path, mediaConfig?.input]);
+const EditComponent = forwardRef(
+  (props: EditProps, ref: React.Ref<HTMLDivElement>) => {
+    const { config } = useConfig();
+    const { isPrivate } = useRepo();
 
-  const editor = useEditor({
-    immediatelyRender: false,
-    extensions: [
-      StarterKit.configure({
-        dropcursor: { width: 2 }
-      }),
-      Image.extend({
-        addAttributes() {
-          return {
-            ...this.parent?.(),
-            class: { default: null },
-            style: { default: null },
-            width: { default: null },
-            height: { default: null }
-          };
+    const {
+      value,
+      field,
+      onChange,
+      name,
+      registerBeforeSubmitHook,
+      onChangeRegistered,
+    } = props;
+    void ref;
+    const form = useFormContext();
+
+    const options = field?.options ?? {};
+    const isReadonly = Boolean(field?.readonly);
+    const format = options.format === "html" ? "html" : "markdown";
+    const showSwitcher = options.switcher !== false;
+    const canonicalValue = typeof value === "string" ? value : "";
+    const [labelSlotEl, setLabelSlotEl] = useState<HTMLElement | null>(null);
+
+    const [mode, setMode] = useState<"editor" | "source">("editor");
+    const [sourceValue, setSourceValue] = useState(canonicalValue);
+    const [editorValue, setEditorValue] = useState(canonicalValue);
+    const [isTransforming, setIsTransforming] = useState(false);
+    const [hasHydratedEditor, setHasHydratedEditor] = useState(false);
+    const [pendingUploads, setPendingUploads] = useState(0);
+    const editorDirtyRef = useRef(false);
+    const editorValueRef = useRef(canonicalValue);
+    const syncedEditorValueRef = useRef(canonicalValue);
+    const onChangeRef = useRef(onChange);
+    const modeRef = useRef(mode);
+    const skipNextSourceToEditorForCanonicalRef = useRef<string | null>(null);
+    const transformSeqRef = useRef(0);
+    const mediaDialogRef = useRef<MediaDialogHandle>(null);
+    const imageSubmitInFlightRef = useRef(false);
+    const pendingImageSelectionRef = useRef<{
+      context?: ImagePickerContext;
+      resolve: (result: { kind: "url"; src: string } | null) => void;
+      settled: boolean;
+    } | null>(null);
+
+    useEffect(() => {
+      if (!props.labelSlotId || typeof document === "undefined") {
+        setLabelSlotEl(null);
+        return;
+      }
+      setLabelSlotEl(document.getElementById(props.labelSlotId));
+    }, [props.labelSlotId]);
+
+    const mediaConfig = useMemo<MediaSchema | undefined>(() => {
+      if (!config?.object?.media?.length || options.media === false)
+        return undefined;
+      if (options.media && typeof options.media === "string") {
+        return getSchemaByName(config.object, options.media, "media") as
+          | MediaSchema
+          | undefined;
+      }
+      return config.object.media[0] as MediaSchema | undefined;
+    }, [config?.object, options.media]);
+
+    const rootPath = useMemo(() => {
+      if (!mediaConfig) return undefined;
+      if (!options.path) return mediaConfig.input;
+
+      const normalizedPath = normalizePath(options.path);
+      const normalizedMediaRoot = normalizePath(mediaConfig.input);
+
+      if (!normalizedPath.startsWith(normalizedMediaRoot)) {
+        return mediaConfig.input;
+      }
+
+      return normalizedPath;
+    }, [mediaConfig, options.path]);
+
+    const allowedExtensions = useMemo(() => {
+      if (!mediaConfig) return extensionCategories.image;
+
+      let extensions = [...extensionCategories.image];
+
+      if (Array.isArray(options.extensions) && options.extensions.length > 0) {
+        extensions = options.extensions;
+      } else if (
+        Array.isArray(options.categories) &&
+        options.categories.length > 0
+      ) {
+        extensions = options.categories.flatMap(
+          (category) => extensionCategories[category] || [],
+        );
+      }
+
+      const mediaExtensions = mediaConfig.extensions;
+      if (Array.isArray(mediaExtensions) && mediaExtensions.length > 0) {
+        extensions = extensions.filter((extension) =>
+          mediaExtensions.includes(extension),
+        );
+      }
+
+      return extensions;
+    }, [mediaConfig, options.categories, options.extensions]);
+
+    const toDisplayImageUrl = useCallback(
+      async (url: string) => {
+        if (!config || !mediaConfig) return url;
+        if (!url || isExternalUrl(url) || isDataUrl(url)) return url;
+        const decodedUrl = normalizeMediaPath(decodePathSafely(url));
+        const canonicalOutputPath = swapPrefix(
+          decodedUrl,
+          mediaConfig.input,
+          mediaConfig.output,
+        );
+
+        const inputPath = swapPrefix(
+          decodedUrl,
+          mediaConfig.output,
+          mediaConfig.input,
+          true,
+        );
+        const normalizedInputPath = normalizePath(inputPath);
+        const mediaInputRoot = normalizePath(mediaConfig.input);
+        if (
+          isAbsolutePath(decodedUrl) &&
+          !normalizedInputPath.startsWith(mediaInputRoot)
+        ) {
+          return url;
         }
-      }).configure({ inline: true }),
-      Link.configure({
-        openOnClick: false,
-        HTMLAttributes: {
-          rel: null,
-          target: null,
-        }
-      }),
-      Placeholder.configure({
-        placeholder: "Type '/' for commands…",
-      }),
-      Commands.configure({
-        suggestion: suggestion(openMediaDialog)
-      }),
-      Table,
-      TableRow,
-      TableHeader,
-      TableCell,
-      TextAlign.configure({ types: ["heading", "paragraph"] }),
-      Underline
-    ],
-    content: "<p></p>",
-    onUpdate: ({ editor }) => onChange(editor.getHTML()),
-    onCreate: async ({ editor }) => {
-      if (config && value) {
+
         try {
-          const initialContent = mediaConfig
-            ? await relativeToRawUrls(config.owner, config.repo, config.branch, mediaConfig.name, value, isPrivate)
-            : value;
-          editor.commands.setContent(initialContent || "<p></p>");
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-          console.warn(errorMessage);
-          toast.error(`${errorMessage} Check if the image exists or if media configuration is correct.`);
-          editor.commands.setContent(value);
+          const rawUrl = await getRawUrl(
+            config.owner,
+            config.repo,
+            config.branch,
+            mediaConfig.name,
+            normalizedInputPath,
+            isPrivate,
+            true,
+          );
+          // Keep output-space path canonical when raw URL resolution misses.
+          return rawUrl || canonicalOutputPath;
+        } catch {
+          return canonicalOutputPath;
+        }
+      },
+      [config, isPrivate, mediaConfig],
+    );
+
+    const toCanonicalImageUrl = useCallback(
+      (url: string) => {
+        if (!config || !mediaConfig) return url;
+        if (!url) return url;
+
+        const relativePath = url.startsWith(
+          "https://raw.githubusercontent.com/",
+        )
+          ? getRelativeUrl(config.owner, config.repo, config.branch, url, false)
+          : url;
+        const normalizedRelativePath = normalizeMediaPath(
+          decodePathSafely(relativePath),
+        );
+
+        return swapPrefix(
+          normalizedRelativePath,
+          mediaConfig.input,
+          mediaConfig.output,
+        );
+      },
+      [config, mediaConfig],
+    );
+
+    const sourceToEditor = useCallback(
+      async (source: string) => {
+        if (!mediaConfig || !config || !source) return source;
+
+        if (format === "html") {
+          const withInputPrefix = htmlSwapPrefix(
+            source,
+            mediaConfig.output,
+            mediaConfig.input,
+            true,
+          );
+          return relativeToRawUrls(
+            config.owner,
+            config.repo,
+            config.branch,
+            mediaConfig.name,
+            withInputPrefix,
+            isPrivate,
+          );
+        }
+
+        const withInputPrefixInMd = rewriteMarkdownImagesSync(source, (url) =>
+          swapPrefix(url, mediaConfig.output, mediaConfig.input, true),
+        );
+        const withInputPrefixEverywhere = htmlSwapPrefix(
+          withInputPrefixInMd,
+          mediaConfig.output,
+          mediaConfig.input,
+          true,
+        );
+        const htmlNormalized = await relativeToRawUrls(
+          config.owner,
+          config.repo,
+          config.branch,
+          mediaConfig.name,
+          withInputPrefixEverywhere,
+          isPrivate,
+        );
+        return rewriteMarkdownImagesAsync(htmlNormalized, toDisplayImageUrl);
+      },
+      [config, format, isPrivate, mediaConfig, toDisplayImageUrl],
+    );
+
+    const editorToSource = useCallback(
+      async (editorContent: string) => {
+        if (!mediaConfig || !config || !editorContent) return editorContent;
+
+        if (format === "html") {
+          const withRelativeUrls = rawToRelativeUrls(
+            config.owner,
+            config.repo,
+            config.branch,
+            editorContent,
+          );
+          return htmlSwapPrefix(
+            withRelativeUrls,
+            mediaConfig.input,
+            mediaConfig.output,
+          );
+        }
+
+        const withRelativeMd = rewriteMarkdownImagesSync(
+          editorContent,
+          toCanonicalImageUrl,
+        );
+        const withRelativeHtml = rawToRelativeUrls(
+          config.owner,
+          config.repo,
+          config.branch,
+          withRelativeMd,
+        );
+        const withOutputPrefixInMd = rewriteMarkdownImagesSync(
+          withRelativeHtml,
+          (url) => swapPrefix(url, mediaConfig.input, mediaConfig.output),
+        );
+        return htmlSwapPrefix(
+          withOutputPrefixInMd,
+          mediaConfig.input,
+          mediaConfig.output,
+        );
+      },
+      [config, format, mediaConfig, toCanonicalImageUrl],
+    );
+
+    useEffect(() => {
+      editorValueRef.current = editorValue;
+    }, [editorValue]);
+
+    useEffect(() => {
+      onChangeRef.current = onChange;
+    }, [onChange]);
+
+    useEffect(() => {
+      modeRef.current = mode;
+    }, [mode]);
+
+    useEffect(() => {
+      setSourceValue(canonicalValue);
+    }, [canonicalValue]);
+
+    useEffect(() => {
+      if (mode !== "editor") return;
+      if (skipNextSourceToEditorForCanonicalRef.current === canonicalValue) {
+        skipNextSourceToEditorForCanonicalRef.current = null;
+        return;
+      }
+      const currentSeq = ++transformSeqRef.current;
+      setIsTransforming(true);
+
+      void sourceToEditor(canonicalValue)
+        .then((displayValue) => {
+          if (currentSeq !== transformSeqRef.current) return;
+          setEditorValue(displayValue);
+          syncedEditorValueRef.current = displayValue;
+          editorDirtyRef.current = false;
+          setHasHydratedEditor(true);
+        })
+        .finally(() => {
+          if (currentSeq === transformSeqRef.current) {
+            setIsTransforming(false);
+          }
+        });
+    }, [canonicalValue, mode, sourceToEditor]);
+
+    const syncEditorToSource = useCallback(async () => {
+      if (!editorDirtyRef.current) return;
+      const canonical = await editorToSource(editorValueRef.current);
+      setSourceValue(canonical);
+      skipNextSourceToEditorForCanonicalRef.current = canonical;
+      if (name) {
+        form.setValue(name, canonical, {
+          shouldDirty: true,
+          shouldTouch: true,
+          shouldValidate: false,
+        });
+      } else {
+        onChangeRef.current(canonical);
+      }
+      editorDirtyRef.current = false;
+    }, [editorToSource, form, name]);
+
+    useEffect(() => {
+      if (!registerBeforeSubmitHook || !name) {
+        return;
+      }
+      const key = `rich-text:${name}`;
+      return registerBeforeSubmitHook(key, async () => {
+        if (modeRef.current !== "editor") return;
+        await syncEditorToSource();
+      });
+    }, [name, registerBeforeSubmitHook, syncEditorToSource]);
+
+    const handleSwitchToEditor = useCallback(async () => {
+      if (pendingUploads > 0) return;
+      if (mode === "editor") return;
+      setMode("editor");
+      const currentSeq = ++transformSeqRef.current;
+      setIsTransforming(true);
+      try {
+        const displayValue = await sourceToEditor(sourceValue);
+        if (currentSeq === transformSeqRef.current) {
+          setEditorValue(displayValue);
+          syncedEditorValueRef.current = displayValue;
+          editorDirtyRef.current = false;
+        }
+      } finally {
+        if (currentSeq === transformSeqRef.current) {
+          setIsTransforming(false);
         }
       }
-      setContentReady(true);
-    }
-  });
+    }, [mode, pendingUploads, sourceToEditor, sourceValue]);
 
-  const handleMediaDialogSubmit = useCallback(async (images: string[]) => {
-    if (!mediaConfig) return;
-
-    if (config && editor) {
-      const content = await Promise.all(images.map(async (image) => {
-        try {
-          // Use unencoded path for API call, but encode for the final URL
-          const url = await getRawUrl(config.owner, config.repo, config.branch, mediaConfig?.name, image, isPrivate);
-          if (url) {
-            // Replace the unencoded path with encoded path in the URL
-            const encodedImage = image.split('/').map(encodeURIComponent).join('/');
-            const encodedUrl = url.replace(image, encodedImage);
-            return `<p><img src="${encodedUrl}"></p>`;
-          }
-          // return `<p><img src="${url}"></p>`;
-          return `<p><img src="" alt="${image}" class="border border-destructive bg-destructive/10 rounded-md" /></p>`;
-        } catch {
-          toast.error(`Failed to load image: ${image}`);
-          // Return a placeholder with error styling
-          return `<p><img src="" alt="${image}" class="border border-destructive bg-destructive/10 rounded-md" /></p>`;
+    const handleSwitchToSource = useCallback(async () => {
+      if (pendingUploads > 0) return;
+      if (mode === "source") return;
+      const currentSeq = ++transformSeqRef.current;
+      setIsTransforming(true);
+      try {
+        await syncEditorToSource();
+        if (currentSeq === transformSeqRef.current) {
+          setMode("source");
         }
-      }));
-      editor.chain().focus().insertContent(content.join('\n')).run();
-    }
-  }, [config, editor, isPrivate, mediaConfig?.name]);
+      } finally {
+        if (currentSeq === transformSeqRef.current) {
+          setIsTransforming(false);
+        }
+      }
+    }, [mode, pendingUploads, syncEditorToSource]);
 
-  const getBlockIcon = (editor: any) => {
-    if (editor.isActive("heading", { level: 1 })) return <Heading1 className="h-4 w-4" />;
-    if (editor.isActive("heading", { level: 2 })) return <Heading2 className="h-4 w-4" />;
-    if (editor.isActive("heading", { level: 3 })) return <Heading3 className="h-4 w-4" />;
-    if (editor.isActive("bulletList")) return <List className="h-4 w-4" />;
-    if (editor.isActive("orderedList")) return <ListOrdered className="h-4 w-4" />;
-    if (editor.isActive("codeBlock")) return <Code className="h-4 w-4" />;
-    if (editor.isActive("blockquote")) return <Quote className="h-4 w-4" />;
-    return <Pilcrow className="h-4 w-4" />;
-  };
+    const resolvePendingImageSelection = useCallback(
+      (result: { kind: "url"; src: string } | null) => {
+        const pending = pendingImageSelectionRef.current;
+        if (!pending || pending.settled) return;
+        pending.settled = true;
+        pendingImageSelectionRef.current = null;
+        pending.resolve(result);
+      },
+      [],
+    );
 
-  const getAlignIcon = (editor: any) => {
-    if (editor.isActive({ textAlign: "center" })) return <AlignCenter className="h-4 w-4" />;
-    if (editor.isActive({ textAlign: "right" })) return <AlignRight className="h-4 w-4" />;
-    if (editor.isActive({ textAlign: "justify" })) return <AlignJustify className="h-4 w-4" />;
-    return <AlignLeft className="h-4 w-4" />;
-  };
+    const handleRequestImage = useCallback(
+      async (context: ImagePickerContext) => {
+        if (!mediaConfig) return null;
+        if (
+          pendingImageSelectionRef.current &&
+          !pendingImageSelectionRef.current.settled
+        ) {
+          resolvePendingImageSelection(null);
+        }
 
-  return (
-    <>
-      <Skeleton className={cn("rounded-md h-[8.5rem]", isContentReady ? "hidden" : "")} />
-      <div className={!isContentReady ? "hidden" : ""}>
-        {editor && <BubbleMenu editor={editor} tippyOptions={{ duration: 25, animation: "scale", maxWidth: "370px" }}>
-          <div className="p-1 rounded-md bg-popover border flex gap-x-[1px] items-center focus-visible:outline-none shadow-md" ref={bubbleMenuRef}>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="xxs"
-                  className="gap-x-1"
-                >
-                  {getBlockIcon(editor)}
-                  <ChevronsUpDown className="w-3 h-3" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" portalProps={{ container: bubbleMenuRef.current }}>
-                <DropdownMenuItem onClick={() => editor.chain().focus().setParagraph().run()} className="gap-x-1.5">
-                  <Pilcrow className="h-4 w-4" />
-                  Text
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => editor.chain().focus().setNode("heading", { level: 1 }).run()} className="gap-x-1.5">
-                  <Heading1 className="h-4 w-4" />
-                  Heading 1
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => editor.chain().focus().setNode("heading", { level: 2 }).run()} className="gap-x-1.5">
-                  <Heading2 className="h-4 w-4" />
-                  Heading 2
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => editor.chain().focus().setNode("heading", { level: 3 }).run()} className="gap-x-1.5">
-                  <Heading3 className="h-4 w-4" />
-                  Heading 3
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => editor.chain().focus().toggleBulletList().run()} className="gap-x-1.5">
-                  <List className="h-4 w-4" />
-                  Bulleted list
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => editor.chain().focus().toggleOrderedList().run()} className="gap-x-1.5">
-                  <ListOrdered className="h-4 w-4" />
-                  Numbered list
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => editor.chain().focus().setParagraph().toggleBlockquote().run()} className="gap-x-1.5">
-                  <Quote className="h-4 w-4" />
-                  Quote
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => editor.chain().focus().toggleCodeBlock().run()} className="gap-x-1.5">
-                  <Code className="h-4 w-4" />
-                  Code
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xxs"
-                  className={cn("shrink-0", editor.isActive("link") ? "bg-muted" : "")}
-                  onClick={() => setLinkUrl(editor.isActive("link") ? editor.getAttributes('link').href : "")}
-                >
-                  <Link2 className="h-4 w-4" />
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="p-1">
-                <div className="flex gap-x-1 items-center">
-                  <Input
-                    className="h-8 flex-1"
-                    placeholder="e.g. http://pagescms.org"
-                    value={linkUrl}
-                    onChange={e => setLinkUrl(e.target.value)}
-                  />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xxs"
-                    className="shrink-0"
-                    onClick={() => linkUrl
-                      ? editor.chain().focus().extendMarkRange('link').setLink({ href: linkUrl }).run()
-                      : editor.chain().focus().extendMarkRange('link').unsetLink()
-                        .run()
-                    }
-                  >Link</Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xxs"
-                    className="shrink-0"
-                    onClick={() => editor.chain().focus().extendMarkRange('link').unsetLink()
-                      .run()}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-              </PopoverContent>
-            </Popover>
-            {(editor.isActive("paragraph") || editor.isActive("heading")) &&
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xxs"
-                    className="gap-x-1"
-                  >
-                    {getAlignIcon(editor)}
-                    <ChevronsUpDown className="w-3 h-3" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent portalProps={{ container: bubbleMenuRef.current }}>
-                  <DropdownMenuItem onClick={() => editor.chain().focus().setTextAlign("left").run()} className="gap-x-1.5">
-                    <AlignLeft className="h-4 w-4" />
-                    Align left
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => editor.chain().focus().setTextAlign("right").run()} className="gap-x-1.5">
-                    <AlignRight className="h-4 w-4" />
-                    Align right
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => editor.chain().focus().setTextAlign("center").run()} className="gap-x-1.5">
-                    <AlignCenter className="h-4 w-4" />
-                    Center
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => editor.chain().focus().setTextAlign("justify").run()} className="gap-x-1.5">
-                    <AlignJustify className="h-4 w-4" />
-                    Justify
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            }
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xxs"
-              onClick={() => editor.chain().focus().toggleBold().run()}
-              className={cn("shrink-0", editor.isActive("bold") ? "bg-muted" : "")}
-            >
-              <Bold className="h-4 w-4" />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xxs"
-              onClick={() => editor.chain().focus().toggleItalic().run()}
-              className={cn("shrink-0", editor.isActive("italic") ? "bg-muted" : "")}
-            >
-              <Italic className="h-4 w-4" />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xxs"
-              onClick={() => editor.chain().focus().toggleStrike().run()}
-              className={cn("shrink-0", editor.isActive("strike") ? "bg-muted" : "")}
-            >
-              <Strikethrough className="h-4 w-4" />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xxs"
-              onClick={() => editor.chain().focus().toggleUnderline().run()}
-              className={cn("shrink-0", editor.isActive("underline") ? "bg-muted" : "")}
-            >
-              <UnderlineIcon className="h-4 w-4" />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xxs"
-              onClick={() => editor.chain().focus().toggleCode().run()}
-              className={cn("shrink-0", editor.isActive("code") ? "bg-muted" : "")}
-            >
-              <Code className="h-4 w-4" />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xxs"
-              onClick={() => editor.chain().focus().unsetAllMarks().clearNodes().run()}
-              className={cn("shrink-0", editor.isActive("code") ? "bg-muted" : "")}
-            >
-              <RemoveFormatting className="h-4 w-4" />
-            </Button>
-            {editor.isActive("table") &&
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xxs"
-                    className="gap-x-1"
-                  >
-                    <TableIcon className="h-4 w-4" />
-                    <ChevronsUpDown className="w-3 h-3" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" portalProps={{ container: bubbleMenuRef.current }}>
-                  <DropdownMenuItem onClick={() => editor.chain().focus().addColumnAfter().run()}>Add a column</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => editor.chain().focus().addRowAfter().run()}>Add a row</DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={() => editor.chain().focus().deleteColumn().run()}>
-                    <span className="text-red-500">Delete column</span>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => editor.chain().focus().deleteRow().run()}>
-                    <span className="text-red-500">Delete row</span>
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            }
-            {mediaConfig && editor.isActive("image") &&
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xxs"
-                    className="shrink-0 text-[0.6rem]"
-                    onClick={() => setImageAlt(editor.getAttributes('image').alt || "")}
-                  >
-                    ALT
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="p-1">
-                  <div className="flex gap-x-1 items-center">
-                    <Input
-                      className="h-8 flex-1"
-                      placeholder="Image description"
-                      value={imageAlt}
-                      onChange={e => setImageAlt(e.target.value)}
-                    />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="xxs"
-                      className="shrink-0"
-                      onClick={() => {
-                        editor.chain().focus().updateAttributes('image', { alt: imageAlt }).run();
-                      }}
-                    >Set</Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="xxs"
-                      className="shrink-0"
-                      onClick={() => {
-                        editor.chain().focus().updateAttributes('image', { alt: "" }).run();
-                      }}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </PopoverContent>
-              </Popover>
-            }
-          </div>
-        </BubbleMenu>}
-        <EditorContent editor={editor} />
-        {mediaConfig && <MediaDialog 
-          ref={mediaDialogRef} 
-          media={mediaConfig?.name}
-          initialPath={rootPath}
-          extensions={allowedExtensions}
-          selected={[]} 
-          onSubmit={handleMediaDialogSubmit} 
-        />}
+        return new Promise<{ kind: "url"; src: string } | null>((resolve) => {
+          context.editor.commands.blur();
+          pendingImageSelectionRef.current = { context, resolve, settled: false };
+          requestAnimationFrame(() => {
+            mediaDialogRef.current?.open();
+          });
+        });
+      },
+      [mediaConfig, resolvePendingImageSelection],
+    );
+
+    const handleMediaSubmit = useCallback(
+      async (images: string[]) => {
+        if (!images.length) {
+          resolvePendingImageSelection(null);
+          return;
+        }
+        imageSubmitInFlightRef.current = true;
+        try {
+          const pending = pendingImageSelectionRef.current;
+          const sources = await Promise.all(images.map((image) => toDisplayImageUrl(image)));
+
+          if (images.length === 1 || !pending?.context) {
+            resolvePendingImageSelection({ kind: "url", src: sources[0] });
+            return;
+          }
+
+          const content = sources.map((src) => ({ type: "image", attrs: { src } }));
+
+          pending.context.editor
+            .chain()
+            .focus()
+            .insertContent(content)
+            .run();
+          resolvePendingImageSelection(null);
+        } finally {
+          imageSubmitInFlightRef.current = false;
+        }
+      },
+      [resolvePendingImageSelection, toDisplayImageUrl],
+    );
+
+    const handleSourceChange = useCallback(
+      (nextValue: string) => {
+        setSourceValue(nextValue);
+        onChange(nextValue);
+        onChangeRegistered?.();
+      },
+      [onChange, onChangeRegistered],
+    );
+
+    const handleUploadImage = useCallback(
+      async (file: File) => {
+        if (!config || !mediaConfig) return null;
+
+        const extension = getFileExtension(file.name);
+        if (
+          allowedExtensions.length > 0 &&
+          !allowedExtensions.includes(extension)
+        ) {
+          throw new Error(
+            `Invalid file extension ".${extension}". Allowed: ${allowedExtensions
+              .map((item) => `.${item}`)
+              .join(", ")}`,
+          );
+        }
+
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result ?? ""));
+          reader.onerror = () =>
+            reject(new Error("Failed to read image file."));
+          reader.readAsDataURL(file);
+        });
+        const content = dataUrl.replace(/^(.+,)/, "");
+        const uploadFilename = (options.rename ?? mediaConfig.rename)
+          ? generateRandomUploadName(extension)
+          : file.name;
+        const targetPath = joinPathSegments([
+          rootPath ?? mediaConfig.input,
+          uploadFilename,
+        ]);
+
+        const response = await fetch(
+          `/api/${config.owner}/${config.repo}/${encodeURIComponent(config.branch)}/files/${encodeURIComponent(targetPath)}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              type: "media",
+              name: mediaConfig.name,
+              content,
+            }),
+          },
+        );
+        if (!response.ok) {
+          throw new Error(
+            `Failed to upload file: ${response.status} ${response.statusText}`,
+          );
+        }
+
+        const payload = (await response.json()) as ApiResponse<FileSaveData>;
+        if (payload.status !== "success") {
+          throw new Error(payload.message);
+        }
+
+        const uploadedPath = payload.data.path || targetPath;
+        const src = await toDisplayImageUrl(uploadedPath);
+        return {
+          src,
+          alt: file.name,
+        };
+      },
+      [
+        allowedExtensions,
+        config,
+        mediaConfig,
+        options.rename,
+        rootPath,
+        toDisplayImageUrl,
+      ],
+    );
+
+    const triggerClass = cn(
+      "relative inline-flex h-[calc(100%-1px)] items-center justify-center whitespace-nowrap border border-transparent px-2 text-[11px] text-foreground/60 transition-all",
+      "hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring",
+      "disabled:pointer-events-none disabled:opacity-50",
+      "dark:text-muted-foreground dark:hover:text-foreground",
+    );
+
+    const switcherNode = (
+      <div className="inline-flex h-6 w-fit items-center justify-center rounded-md bg-muted p-0.5 text-muted-foreground">
+        <button
+          type="button"
+          className={cn(
+            triggerClass,
+            "rounded-sm",
+            mode === "editor" &&
+              "bg-background text-foreground dark:border-input dark:bg-input/30 dark:text-foreground",
+          )}
+          onClick={() => void handleSwitchToEditor()}
+          disabled={isReadonly || isTransforming || pendingUploads > 0}
+          data-active={mode === "editor" ? "true" : undefined}
+        >
+          Editor
+        </button>
+        <button
+          type="button"
+          className={cn(
+            triggerClass,
+            "rounded-sm",
+            mode === "source" &&
+              "bg-background text-foreground dark:border-input dark:bg-input/30 dark:text-foreground",
+          )}
+          onClick={() => void handleSwitchToSource()}
+          disabled={isReadonly || isTransforming || pendingUploads > 0}
+          data-active={mode === "source" ? "true" : undefined}
+        >
+          Source
+        </button>
       </div>
-    </>
-  )
-});
+    );
+
+    return (
+      <div className="space-y-2">
+        {showSwitcher && !labelSlotEl && (
+          <div className="flex items-center justify-end">
+            {switcherNode}
+          </div>
+        )}
+        {showSwitcher &&
+          labelSlotEl &&
+          createPortal(
+            <div className="flex items-center">{switcherNode}</div>,
+            labelSlotEl,
+          )}
+
+        {mode === "editor" ? (
+          !hasHydratedEditor && isTransforming ? (
+            <Skeleton className="h-40 w-full rounded-md" />
+          ) : (
+          <Editor
+            value={editorValue}
+            onChange={(nextValue) => {
+              if (nextValue === syncedEditorValueRef.current) return;
+              if (!editorDirtyRef.current && name) {
+                // Mark field dirty immediately without running full source/editor transforms on every keystroke.
+                const currentValue = form.getValues(name);
+                form.setValue(name, currentValue, {
+                  shouldDirty: true,
+                  shouldTouch: true,
+                  shouldValidate: false,
+                });
+              }
+              editorDirtyRef.current = true;
+              syncedEditorValueRef.current = nextValue;
+              setEditorValue(nextValue);
+              onChangeRegistered?.();
+            }}
+            format={format}
+            className="cn-editor"
+            enableImagePasteDrop={Boolean(mediaConfig)}
+            onUploadImage={mediaConfig ? handleUploadImage : undefined}
+            onRequestImage={mediaConfig ? handleRequestImage : undefined}
+            onPendingUploadsChange={setPendingUploads}
+            disabled={isReadonly}
+          />
+          )
+        ) : (
+          <Textarea
+            value={sourceValue}
+            onChange={(event) => handleSourceChange(event.target.value)}
+            className="font-mono min-h-40"
+            spellCheck={false}
+            readOnly={isReadonly}
+          />
+        )}
+
+        {mediaConfig && (
+          <MediaDialog
+            ref={mediaDialogRef}
+            media={mediaConfig.name}
+            initialPath={rootPath}
+            extensions={allowedExtensions}
+            onSubmit={handleMediaSubmit}
+            onOpenChange={(open) => {
+              if (!open && !imageSubmitInFlightRef.current) {
+                resolvePendingImageSelection(null);
+              }
+            }}
+          />
+        )}
+      </div>
+    );
+  },
+);
+
+EditComponent.displayName = "EditComponent";
 
 export { EditComponent };

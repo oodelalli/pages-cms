@@ -1,6 +1,7 @@
 import { createOctokitInstance } from "@/lib/utils/octokit";
-import { getAuth } from "@/lib/auth";
 import { getToken } from "@/lib/token";
+import { createHttpError, toErrorResponse } from "@/lib/api-error";
+import { requireApiUserSession } from "@/lib/session-server";
 
 /**
  * Creates a new branch in a GitHub repository.
@@ -12,17 +13,19 @@ import { getToken } from "@/lib/token";
 
 export async function POST(
   request: Request,
-  { params }: { params: { owner: string, repo: string, branch: string } }
+  context: { params: Promise<{ owner: string, repo: string, branch: string }> }
 ) {
   try {
-    const { user, session } = await getAuth();
-    if (!session) return new Response(null, { status: 401 });
+    const params = await context.params;
+    const sessionResult = await requireApiUserSession();
+    if ("response" in sessionResult) return sessionResult.response;
+    const user = sessionResult.user;
 
-    const token = await getToken(user, params.owner, params.repo);
-    if (!token) throw new Error("Token not found");
+    const { token } = await getToken(user, params.owner, params.repo, true);
+    if (!token) throw createHttpError("Token not found", 401);
 
     const data: any = await request.json();
-    if (!data.name) throw new Error(`"name" is required.`);
+    if (!data.name) throw createHttpError(`"name" is required.`, 400);
 
     const octokit = createOctokitInstance(token);
 
@@ -49,9 +52,6 @@ export async function POST(
     });
   } catch (error: any) {
     console.error(error);
-    return Response.json({
-      status: "error",
-      message: error.message,
-    });
+    return toErrorResponse(error);
   }
 }

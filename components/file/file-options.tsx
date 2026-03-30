@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useConfig } from "@/contexts/config-context";
 import { getParentPath, getRelativePath, joinPathSegments, normalizePath } from "@/lib/utils/file";
 import { getSchemaByName } from "@/lib/schema";
+import { requireApiSuccess } from "@/lib/api-client";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -79,11 +80,7 @@ export function FileOptions({
             method: "DELETE",
           });
 
-          const data: any = await response.json();
-
-          if (!response.ok) throw new Error(data.message || `Failed to delete file: ${response.status} ${response.statusText}`);
-
-          if (data.status !== "success") throw new Error(data.message);
+          const data = await requireApiSuccess<any>(response, "Failed to delete file");
 
           resolve(data);
         } catch (error) {
@@ -114,8 +111,8 @@ export function FileOptions({
           <DropdownMenuContent align="end" portalProps={portalProps}>
             <DropdownMenuItem asChild>
               <a href={`https://github.com/${config.owner}/${config.repo}/blob/${encodeURIComponent(config.branch)}/${path}`} target="_blank">
-                <span className="mr-4">See on GitHub</span>
-                <ArrowUpRight className="h-3 w-3 ml-auto min-ml-4 opacity-50" />
+                View on GitHub
+                <ArrowUpRight className="size-3 text-muted-foreground ml-auto" />
               </a>
             </DropdownMenuItem>
             {type !== "settings"
@@ -127,8 +124,8 @@ export function FileOptions({
                     </DropdownMenuItem>
                   }
                   <AlertDialogTrigger asChild>
-                    <DropdownMenuItem>
-                      <span className="text-red-500">Delete</span>
+                    <DropdownMenuItem variant="destructive">
+                      Delete
                     </DropdownMenuItem>
                   </AlertDialogTrigger>
                 </>
