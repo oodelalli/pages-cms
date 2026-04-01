@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
-import { getConfig } from "@/lib/utils/config";
+import { getConfig } from "@/lib/config-store";
 import { ConfigProvider } from "@/contexts/config-context";
 import { RepoLayout } from "@/components/repo/repo-layout";
 import { getServerSession } from "@/lib/session-server";
@@ -67,7 +67,7 @@ export default async function Layout({
               <EmptyDescription>{`The branch "${decodedBranch}" could not be found. It may have been removed or renamed.`}</EmptyDescription>
             </EmptyHeader>
             <EmptyContent>
-              <Link className={buttonVariants({ variant: "default", size: "sm" })} href={`/${owner}/${repo}`}>
+              <Link className={buttonVariants({ variant: "default" })} href={`/${owner}/${repo}`}>
                 Open default branch
               </Link>
             </EmptyContent>
@@ -82,7 +82,7 @@ export default async function Layout({
             <EmptyDescription>You do not have permission to access this repository.</EmptyDescription>
           </EmptyHeader>
           <EmptyContent>
-            <Link className={buttonVariants({ variant: "default", size: "sm" })} href="/">
+            <Link className={buttonVariants({ variant: "default" })} href="/">
               Choose another repository
             </Link>
           </EmptyContent>

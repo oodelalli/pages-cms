@@ -3,7 +3,7 @@ import { headers } from "next/headers";
 import { getToken } from "@/lib/token";
 import { RepoProvider } from "@/contexts/repo-context";
 import { getServerSession } from "@/lib/session-server";
-import { getRepoSnapshot } from "@/lib/github-cache";
+import { getRepoSnapshot } from "@/lib/github-cache-file";
 import { GithubAuthExpired } from "@/components/github-auth-expired";
 import { isGithubAuthError } from "@/lib/github-auth";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
@@ -43,7 +43,7 @@ export default async function Layout({
             <EmptyDescription>Create a branch and add a &quot;.pages.yml&quot; file to configure this repository.</EmptyDescription>
           </EmptyHeader>
           <EmptyContent>
-            <Link className={buttonVariants({ variant: "default", size: "sm" })} href="/">
+            <Link className={buttonVariants({ variant: "default" })} href="/">
               Choose another repository
             </Link>
           </EmptyContent>
@@ -71,7 +71,7 @@ export default async function Layout({
               <EmptyDescription>It may have been removed, renamed, or the URL may be incorrect.</EmptyDescription>
             </EmptyHeader>
             <EmptyContent>
-              <Link className={buttonVariants({ variant: "default", size: "sm" })} href="/">
+              <Link className={buttonVariants({ variant: "default" })} href="/">
                 Choose another repository
               </Link>
             </EmptyContent>
@@ -85,7 +85,7 @@ export default async function Layout({
               <EmptyDescription>You do not have permission to access this repository.</EmptyDescription>
             </EmptyHeader>
             <EmptyContent>
-              <Link className={buttonVariants({ variant: "default", size: "sm" })} href="/">
+              <Link className={buttonVariants({ variant: "default" })} href="/">
                 Choose another repository
               </Link>
             </EmptyContent>

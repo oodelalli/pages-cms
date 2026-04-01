@@ -4,14 +4,14 @@ import { writeFns } from "@/fields/registry";
 import { configVersion, parseConfig, normalizeConfig } from "@/lib/config";
 import { stringify, parse } from "@/lib/serialization";
 import { deepMap, generateZodSchema, getSchemaByName, sanitizeObject } from "@/lib/schema";
-import { getConfig, updateConfig } from "@/lib/utils/config";
+import { getConfig, updateConfig } from "@/lib/config-store";
 import { getFileExtension, getFileName, normalizePath, serializedTypes, getParentPath } from "@/lib/utils/file";
-import { assertGithubIdentity } from "@/lib/authz";
+import { assertGithubIdentity } from "@/lib/authz-shared";
 import { getToken } from "@/lib/token";
-import { updateFileCache } from "@/lib/github-cache";
+import { updateFileCache } from "@/lib/github-cache-file";
 import { createHttpError, toErrorResponse } from "@/lib/api-error";
 import mergeWith from "lodash.mergewith";
-import { buildCommitTokens, resolveCommitMessage } from "@/lib/commit-message";
+import { buildCommitTokens, resolveCommitIdentity, resolveCommitMessage } from "@/lib/commit-message";
 import { requireApiUserSession } from "@/lib/session-server";
 
 /**
@@ -33,14 +33,8 @@ export async function POST(
     if ("response" in sessionResult) return sessionResult.response;
     const user = sessionResult.user;
 
-    const { token, source } = await getToken(user, params.owner, params.repo, true);
+    const { token } = await getToken(user, params.owner, params.repo, true);
     if (!token) throw new Error("Token not found");
-    const committer = source === "installation"
-      ? {
-          name: user.name?.trim() || user.email,
-          email: user.email,
-        }
-      : undefined;
 
     const normalizedPath = normalizePath(params.path);
 
@@ -55,6 +49,7 @@ export async function POST(
     let contentBase64;
     let schema;
     let schemaCommitTemplates: Record<string, string> | undefined;
+    let schemaCommitIdentity: "app" | "user" | undefined;
 
     switch (data.type) {
       case "content":
@@ -63,6 +58,7 @@ export async function POST(
         schema = getSchemaByName(config?.object, data.name);
         if (!schema) throw new Error(`Content schema not found for ${data.name}.`);
         schemaCommitTemplates = schema?.commit?.templates;
+        schemaCommitIdentity = schema?.commit?.identity;
 
         if (!normalizedPath.startsWith(schema.path)) throw new Error(`Invalid path "${params.path}" for ${data.type} "${data.name}".`);
 
@@ -74,7 +70,7 @@ export async function POST(
           // Folder creation
           contentBase64 = "";
         } else {
-          if (getFileExtension(normalizedPath) !== schema.extension) throw new Error(`Invalid extension "${getFileExtension(normalizedPath)}" for ${data.type} "${data.name}".`);
+          if (getFileExtension(normalizedPath) !== (schema.extension ?? "")) throw new Error(`Invalid extension "${getFileExtension(normalizedPath)}" for ${data.type} "${data.name}".`);
 
           if (serializedTypes.includes(schema.format) && schema.fields) {
             let contentFields;
@@ -166,6 +162,7 @@ export async function POST(
         schema = getSchemaByName(config?.object, data.name, "media");
         if (!schema) throw new Error(`Media schema not found for ${data.name}.`);
         schemaCommitTemplates = schema?.commit?.templates;
+        schemaCommitIdentity = schema?.commit?.identity;
 
         if (!normalizedPath.startsWith(schema.input)) throw new Error(`Invalid path "${params.path}" for media "${data.name}".`);
 
@@ -190,6 +187,20 @@ export async function POST(
       default:
         throw new Error(`Invalid type "${data.type}".`);
     }
+
+    const commitIdentity = resolveCommitIdentity({
+      configObject: config?.object,
+      identityOverride: schemaCommitIdentity,
+    });
+    const committer = (
+      commitIdentity === "user" &&
+      user.email
+    )
+      ? {
+          name: user.name?.trim() || user.email,
+          email: user.email,
+        }
+      : undefined;
 
     const response = await githubSaveFile(
       token,
@@ -327,8 +338,24 @@ const githubSaveFile = async (
     }
     throw new Error("Invalid response structure");
   } catch (error: any) {
+    const githubMessage = typeof error?.response?.data?.message === "string"
+      ? error.response.data.message
+      : undefined;
+
     if (error.status === 409) {
-      error.message = "File has changed since you last loaded it. Please refresh the page and try again.";
+      if (githubMessage?.includes("Repository rule violations found")) {
+        throw createHttpError(
+          "This repository requires changes through a pull request. Save to a different branch or fork, or ask a maintainer to relax the repository rule for direct edits.",
+          409,
+        );
+      }
+
+      if (sha) {
+        throw createHttpError(
+          "File has changed since you last loaded it. Please refresh the page and try again.",
+          409,
+        );
+      }
     }
 
     // Only handle 422 errors for new files (no sha)
@@ -422,14 +449,8 @@ export async function DELETE(
     if ("response" in sessionResult) return sessionResult.response;
     const user = sessionResult.user;
 
-    const { token, source } = await getToken(user, params.owner, params.repo, true);
+    const { token } = await getToken(user, params.owner, params.repo, true);
     if (!token) throw new Error("Token not found");
-    const committer = source === "installation"
-      ? {
-          name: user.name?.trim() || user.email,
-          email: user.email,
-        }
-      : undefined;
 
     if (params.path === ".pages.yml") throw new Error(`Deleting the settings file isn't allowed.`);
 
@@ -450,6 +471,7 @@ export async function DELETE(
     const normalizedPath = normalizePath(params.path);
     let schema;
     let schemaCommitTemplates: Record<string, string> | undefined;
+    let schemaCommitIdentity: "app" | "user" | undefined;
 
     switch (type) {
       case "content":
@@ -458,6 +480,7 @@ export async function DELETE(
         schema = getSchemaByName(config.object, name);
         if (!schema) throw new Error(`Content schema not found for ${name}.`);
         schemaCommitTemplates = schema?.commit?.templates;
+        schemaCommitIdentity = schema?.commit?.identity;
 
         if (!normalizedPath.startsWith(schema.path)) throw new Error(`Invalid path "${params.path}" for ${type} "${name}".`);
 
@@ -465,7 +488,6 @@ export async function DELETE(
           throw new Error(`Subfolders are not allowed for collection "${name}".`);
         }
 
-        if (getFileExtension(normalizedPath) !== schema.extension) throw new Error(`Invalid extension "${getFileExtension(normalizedPath)}" for ${type} "${name}".`);
         break;
       case "media":
         if (!name) throw new Error(`"name" is required for media.`);
@@ -473,6 +495,7 @@ export async function DELETE(
         schema = getSchemaByName(config.object, name, "media");
         if (!schema) throw new Error(`Media schema not found for ${name}.`);
         schemaCommitTemplates = schema?.commit?.templates;
+        schemaCommitIdentity = schema?.commit?.identity;
 
         if (!normalizedPath.startsWith(schema.input)) throw new Error(`Invalid path "${params.path}" for media "${name}".`);
 
@@ -483,7 +506,19 @@ export async function DELETE(
         break;
     }
 
-	const commitMsgPrefix = params.branch === `main` ? `[skip ci]` : ``;
+    const commitIdentity = resolveCommitIdentity({
+      configObject: config.object,
+      identityOverride: schemaCommitIdentity,
+    });
+    const committer = (
+      commitIdentity === "user" &&
+      user.email
+    )
+      ? {
+          name: user.name?.trim() || user.email,
+          email: user.email,
+        }
+      : undefined;
 
     const octokit = createOctokitInstance(token);
     const response = await octokit.rest.repos.deleteFile({
@@ -519,7 +554,15 @@ export async function DELETE(
       params.branch,
       {
         type: 'delete',
-        path: normalizedPath
+        path: normalizedPath,
+        commit: response?.data.commit?.sha
+          ? {
+              sha: response.data.commit.sha,
+              timestamp: new Date(
+                response.data.commit.committer?.date ?? new Date().toISOString(),
+              ).getTime(),
+            }
+          : undefined,
       }
     );
 

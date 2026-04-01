@@ -8,6 +8,18 @@ import { z } from "zod";
 import { Field } from "@/types/field";
 import { format } from "date-fns";
 
+type SchemaGroupTrailItem = {
+  name: string;
+  label?: string;
+};
+
+type NavigationNode = {
+  type: "group" | "file" | "collection" | "media";
+  name: string;
+  label?: string;
+  items?: NavigationNode[];
+};
+
 // Deep map a content object to a schema
 const deepMap = (
   contentObject: Record<string, any>,
@@ -266,26 +278,36 @@ const sanitizeObject = (object: any): any => {
   return object;
 };
 
-// Retrieve the deepest matching content schema in the config for a file
-const getSchemaByPath = (config: Record<string, any>, path: string) => {
-  if (!config || !config.content) return null;
-  
-  const normalizedPath = `/${path}/`.replace(/\/\/+/g, "/");
-  
-  // Sort the entries by the depth of their path, and normalize them
-  const matches = config.content
-    .map((item: Record<string, any>) => {
-      const normalizedConfigPath = `/${item.path}/`.replace(/\/\/+/g, "/");
-      return { ...item, path: normalizedConfigPath };
-    })
-    .filter((item: Record<string, any>)  => normalizedPath.startsWith(item.path))
-    .sort((a:  Record<string, any>, b:  Record<string, any>) => b.path.length - a.path.length);
-  
-    // Return the first item in the sorted array which will be the deepest match, or undefined if no match.
-  const schema = matches[0];
+const getSchemaGroupTrail = (
+  config: Record<string, any> | null | undefined,
+  name: string,
+): SchemaGroupTrailItem[] => {
+  const navigation = config?.navigation?.content as NavigationNode[] | undefined;
+  if (!navigation?.length || !name) return [];
 
-  // We deep clone the object to avoid mutating config if schema is modified.
-  return schema ? JSON.parse(JSON.stringify(schema)) : null;
+  const visit = (
+    nodes: NavigationNode[],
+    parents: SchemaGroupTrailItem[],
+  ): SchemaGroupTrailItem[] | null => {
+    for (const node of nodes) {
+      if (node.type === "group") {
+        const match = visit(node.items || [], [
+          ...parents,
+          { name: node.name, label: node.label || node.name },
+        ]);
+        if (match) return match;
+        continue;
+      }
+
+      if (node.name === name) {
+        return parents;
+      }
+    }
+
+    return null;
+  };
+
+  return visit(navigation, []) || [];
 };
 
 // Retrieve the matching schema for a media or content entry
@@ -302,7 +324,13 @@ const getSchemaByName = (config: Record<string, any> | null | undefined, name: s
     : config.content.find((item: Record<string, any>) => item.name === name);
 
   // We deep clone the object to avoid mutating config if schema is modified.
-  return schema ? JSON.parse(JSON.stringify(schema)) : null;
+  if (!schema) return null;
+
+  const clonedSchema = JSON.parse(JSON.stringify(schema));
+  if (type === "content") {
+    clonedSchema.groupTrail = getSchemaGroupTrail(config, name);
+  }
+  return clonedSchema;
 };
 
 // Safely access nested properties in an object
@@ -430,7 +458,6 @@ export {
   initializeState,
   getDefaultValue,
   sanitizeObject,
-  getSchemaByPath,
   getSchemaByName,
   getFieldByPath,
   getPrimaryField,

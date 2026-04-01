@@ -4,8 +4,8 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useConfig } from "@/contexts/config-context";
 import { useUser } from "@/contexts/user-context";
-import { hasGithubIdentity } from "@/lib/authz";
-import { isConfigEnabled } from "@/lib/config-settings";
+import { hasGithubIdentity } from "@/lib/authz-shared";
+import { isConfigEnabled } from "@/lib/config";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button";
@@ -38,7 +38,7 @@ export default function Page() {
             </EmptyHeader>
             <EmptyContent>
               <Link
-                className={buttonVariants({ variant: "default", size: "sm" })}
+                className={buttonVariants({ variant: "default" })}
                 href={`https://github.com/${config?.owner}/${config?.repo}/edit/${encodeURIComponent(config!.branch)}/.pages.yml`}
               >
                 Edit configuration on GitHub
