@@ -37,13 +37,68 @@ export const auth = betterAuth({
     github: {
       clientId: process.env.GITHUB_APP_CLIENT_ID as string,
       clientSecret: process.env.GITHUB_APP_CLIENT_SECRET as string,
-      overrideUserInfoOnSignIn: true,
+      overrideUserInfoOnSignIn: false,
       mapProfileToUser: (profile) => ({
         name: profile.name ?? profile.login,
         image: profile.avatar_url ?? null,
         githubUsername: profile.login,
       }),
       scope: ["repo", "user:email"],
+      getUserInfo: async (token) => {
+        const profileResponse = await fetch("https://api.github.com/user", {
+          headers: {
+            "User-Agent": "better-auth",
+            Authorization: `Bearer ${token.accessToken}`,
+          },
+        });
+
+        if (!profileResponse.ok) {
+          console.warn("[auth] github getUserInfo failed", {
+            status: profileResponse.status,
+            githubRequestId: profileResponse.headers.get("x-github-request-id"),
+            rateLimitRemaining: profileResponse.headers.get("x-ratelimit-remaining"),
+          });
+          return null;
+        }
+
+        const profile = await profileResponse.json();
+
+        let emails:
+          | Array<{ email: string; primary: boolean; verified: boolean; visibility: "public" | "private" }>
+          | undefined;
+        try {
+          const emailsResponse = await fetch("https://api.github.com/user/emails", {
+            headers: {
+              Authorization: `Bearer ${token.accessToken}`,
+              "User-Agent": "better-auth",
+            },
+          });
+          if (emailsResponse.ok) {
+            emails = await emailsResponse.json();
+          }
+        } catch {}
+
+        if (!profile.email && emails) {
+          profile.email = (emails.find((entry) => entry.primary) ?? emails[0])?.email as string;
+        }
+        const emailVerified = emails?.find((entry) => entry.email === profile.email)?.verified ?? false;
+
+        const userMap = {
+          name: profile.name ?? profile.login,
+          image: profile.avatar_url ?? null,
+          githubUsername: profile.login,
+        };
+
+        return {
+          user: {
+            id: profile.id,
+            email: profile.email,
+            emailVerified,
+            ...userMap,
+          },
+          data: profile,
+        };
+      },
     },
   },
   database: drizzleAdapter(db, {
